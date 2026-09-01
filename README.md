@@ -86,32 +86,46 @@ Day to day there is nothing to run — the hooks do the work.
 Claude Code turn ends
   └─ Stop hook (async)  →  scripts/run  →  src/reporter.mjs
         reads $transcript_path from the last recorded byte offset
+        sweeps every other tracked transcript that has grown since
         keeps assistant entries that carry message.usage
         POST <portal>/v1/usage/ingest   { source: "claude-code", events: [...] }
 ```
 
 Hooks: `SessionStart`, `Stop`, `SubagentStop`, `PreCompact`, `SessionEnd` — all
-declared `async`, so nothing ever waits on an upload. `SessionStart` exists to
-drain the spool: usage from a session that ended while the portal was down gets
-sent when the next session starts.
+declared `async`, so nothing ever waits on an upload. Any of them also drains
+the spool and runs the catch-up sweep, so usage from a session that ended while
+the portal was down — or that ended without a last hook at all — is sent by
+whichever session next fires one.
 
 State lives in `~/.claude/jyl-usage/`:
 
 | File | Holds |
 |---|---|
-| `state.json` | Per-transcript byte offset, so each line is read exactly once. |
+| `state.json` | Per-transcript byte offset, so each line is read exactly once. Rewritten only when an offset actually moves. |
+| `seen` | The dedup window — the last few thousand request ids sent, newest last. Its own file because `state.json` is touched every turn and this is the part that grows. |
 | `spool.jsonl` | Events read but not yet accepted. Retried on every later run. |
 | `log` | What happened, capped at 256 KB. |
 | `lock` | Serialises concurrent sessions; stale after 60 s. |
 
 ### Things worth knowing
 
+**Nothing waits for someone to notice it.** Reading only the transcript named
+in the hook payload left usage stranded whenever a run had no chance to finish
+the file: a hook that lost the lock to a concurrent session, or a session killed
+before its last turn was read. Those bytes were not late, they were lost —
+`backfill` could recover them, but only for people who knew to run it. Every run
+now also sweeps the transcripts it already tracks for bytes nothing came back
+for, newest first, capped per run so no single hook does an unbounded amount of
+work.
+
 **Duplicates are impossible, by design at both ends.** Claude Code writes one
 transcript entry per content block, so a single API request that produced text
 *and* a tool call appears twice with the same `requestId` and the same `usage`.
-The plugin filters the repeat, and the portal deduplicates on request id under a
-unique index regardless — which is what makes retrying safe, and what makes
-`backfill` safe to run as often as you like.
+Resuming a session goes further and copies its whole history into a new
+transcript file. The plugin filters both against one global dedup window — per
+transcript would not have recognised the fork — and the portal deduplicates on
+request id under a unique index regardless, which is what makes retrying safe
+and `backfill` safe to run as often as you like.
 
 **A failed upload never loses usage.** Events go to the spool and the byte
 offset still advances, so the same lines are not read forever. Both writes

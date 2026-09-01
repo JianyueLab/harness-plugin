@@ -1,7 +1,7 @@
 {
   "name": "jyl-usage",
   "description": "Reports Claude Code token usage to the JianyueLab LLM portal, so subscription spend shows up beside gateway traffic. Counts only — no prompts, completions or paths leave the machine.",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "author": {
     "name": "JianyueLab"
   },

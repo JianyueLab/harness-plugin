@@ -19,9 +19,12 @@
  *      `async`, every failure path exits 0, and the only work on the hot path is
  *      reading the bytes appended since last time.
  *   2. **Never lose usage, never double-count it.** A byte offset per transcript
- *      means each line is read once; a failed upload spools to disk and is
- *      retried on the next hook rather than dropped; and the server dedups on
- *      request id, so a retry that actually did land inserts nothing.
+ *      means each line is read once; every run also sweeps the transcripts it
+ *      already tracks for bytes nothing ever came back for, so a hook that lost
+ *      the lock or a session that never reached SessionEnd cannot strand a
+ *      turn; a failed upload spools to disk and is retried on the next hook
+ *      rather than dropped; and the server dedups on request id, so a retry
+ *      that actually did land inserts nothing.
  *   3. **Zero dependencies, zero build.** Plain ESM on node/bun built-ins, so
  *      the plugin is the source and there is no dist/ to keep in sync.
  */
@@ -30,7 +33,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-const CLIENT = "claude-code-usage-reporter/0.1.0";
+const CLIENT = "claude-code-usage-reporter/0.2.0";
 const SOURCE = "claude-code";
 
 const CLAUDE_DIR = path.join(os.homedir(), ".claude");
@@ -38,6 +41,7 @@ const STATE_DIR = path.join(CLAUDE_DIR, "jyl-usage");
 const CONFIG_FILE = path.join(STATE_DIR, "config.json");
 const STATE_FILE = path.join(STATE_DIR, "state.json");
 const SPOOL_FILE = path.join(STATE_DIR, "spool.jsonl");
+const SEEN_FILE = path.join(STATE_DIR, "seen");
 const LOCK_FILE = path.join(STATE_DIR, "lock");
 const LOG_FILE = path.join(STATE_DIR, "log");
 
@@ -45,17 +49,29 @@ const LOG_FILE = path.join(STATE_DIR, "log");
 const BATCH_SIZE = 500;
 /** Upload timeout. A hook that hangs is worse than usage reported one turn late. */
 const REQUEST_TIMEOUT_MS = 10_000;
-/** Dedup keys remembered per transcript — only needs to span one read boundary. */
-const SEEN_PER_FILE = 200;
+/**
+ * Dedup keys kept in `seen` — globally, not per transcript.
+ *
+ * Per transcript was the wrong axis. Resuming or forking a session copies the
+ * history into a *new* transcript file, so every already-reported turn in it
+ * looked new and was POSTed again for the portal to reject: one observed run
+ * sent 82 events to have 72 of them recognised at the far end. One shared
+ * window recognises them here instead.
+ */
+const SEEN_KEYS = 3_000;
+/** Rewrite `seen` once it has grown this far past the window; until then, append. */
+const SEEN_COMPACT_AT = 4_500;
 /** Spool ceiling. Past this the portal has been unreachable for a very long time. */
 const MAX_SPOOL_EVENTS = 5_000;
 const MAX_LOG_BYTES = 256 * 1024;
 /** Transcripts touched within this many days are in scope for `--backfill`. */
 const DEFAULT_BACKFILL_DAYS = 30;
-/** Below this many tracked transcripts, pruning isn't worth a stat per file. */
-const PRUNE_ABOVE_FILES = 200;
+/** Stale transcripts drained per catch-up sweep. The rest wait for the next run. */
+const MAX_SWEEP_FILES = 25;
 /** How long a finished transcript stays in `state.json` before being forgotten. */
 const STATE_RETENTION_DAYS = 90;
+/** Bump when `state.json`'s shape changes; `loadState` migrates anything older. */
+const STATE_VERSION = 2;
 
 // ---------------------------------------------------------------------------
 // Small utilities
@@ -84,10 +100,10 @@ function readJson(file, fallback) {
   }
 }
 
-function writeJsonAtomic(file, value) {
+function writeTextAtomic(file, text) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const tmp = `${file}.${process.pid}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify(value, null, 2));
+  fs.writeFileSync(tmp, text);
   fs.renameSync(tmp, file);
 }
 
@@ -342,6 +358,54 @@ function writeSpool(events) {
 }
 
 // ---------------------------------------------------------------------------
+// Seen keys — what the portal has already been handed
+// ---------------------------------------------------------------------------
+
+/**
+ * The dedup window, newest last.
+ *
+ * Two different things repeat a key. Claude Code writes one transcript entry
+ * per content block, so a single API response restates its `requestId` and its
+ * `usage` verbatim across several lines; and resuming a session copies the
+ * whole history into a new transcript file. Either way the portal would reject
+ * the repeat — filtering here just saves the round trip, and stops a healthy
+ * run from logging like a broken one.
+ *
+ * It lives in its own file rather than inside `state.json` because
+ * `state.json` is rewritten on every turn and this is the part of it that
+ * grows: on one machine it had reached 162 KB, of which the keys were 150. Kept
+ * apart, the hot path appends a few dozen bytes here and rewrites three
+ * kilobytes there.
+ */
+function readSeen() {
+  try {
+    return fs.readFileSync(SEEN_FILE, "utf8").split("\n").filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Persist the window: `all` is every key now known in order, `added` the tail
+ * this run contributed.
+ *
+ * Appending is the hot path, so the full rewrite that enforces the window is
+ * amortised — the file is allowed to overshoot to `SEEN_COMPACT_AT` and is then
+ * trimmed back to `SEEN_KEYS` in one go. Dropping the oldest is safe: a key
+ * ages out only once its transcript has long been read to the end, and if one
+ * ever does come back the portal still refuses to store it twice.
+ */
+function persistSeen(all, added) {
+  if (added.length === 0) return;
+  fs.mkdirSync(STATE_DIR, { recursive: true });
+  if (all.length > SEEN_COMPACT_AT) {
+    writeTextAtomic(SEEN_FILE, all.slice(-SEEN_KEYS).join("\n") + "\n");
+    return;
+  }
+  fs.appendFileSync(SEEN_FILE, added.join("\n") + "\n");
+}
+
+// ---------------------------------------------------------------------------
 // Upload
 // ---------------------------------------------------------------------------
 
@@ -417,65 +481,93 @@ async function upload(config, events) {
 // ---------------------------------------------------------------------------
 
 function loadState() {
-  const state = readJson(STATE_FILE, null);
-  return state && typeof state === "object" && state.files ? state : { version: 1, files: {} };
+  const raw = readJson(STATE_FILE, null);
+  if (!raw || typeof raw !== "object" || !raw.files) return { version: STATE_VERSION, files: {} };
+  if (raw.version === STATE_VERSION) return raw;
+
+  // v1 → v2. Offsets carry over untouched; the per-transcript `seen` arrays are
+  // folded into the one global window, so an upgrade costs nothing — none of
+  // what v1 had already reported makes a second trip to the portal just
+  // because the file layout changed. `carried` is transient: `report` writes it
+  // into `seen` and deletes it before the state is serialised.
+  const state = { version: STATE_VERSION, files: {}, carried: [] };
+  for (const [file, entry] of Object.entries(raw.files)) {
+    if (!entry || typeof entry !== "object") continue;
+    state.files[file] = { offset: Number.isFinite(entry.offset) ? entry.offset : 0 };
+    for (const key of Array.isArray(entry.seen) ? entry.seen : []) state.carried.push(key);
+  }
+  return state;
 }
 
 /**
- * Forget transcripts that are gone or long finished.
+ * Decide which transcripts this run reads, and forget the entries it should.
  *
- * Every session ever seen would otherwise keep an entry — an offset plus up to
- * `SEEN_PER_FILE` dedup keys — for ever, and this file is parsed and rewritten
- * on every single turn. Pruning only above a threshold keeps the hot path free
- * of a stat-per-transcript in the common case where there are a handful.
+ * **The sweep is what makes automatic reporting whole.** Before it, a run only
+ * ever read the transcript Claude Code named in the hook payload — so a turn
+ * written after a session's last hook, or a hook that lost the lock to a
+ * concurrent session and bowed out, left bytes that nothing would ever come
+ * back for. They were not late; they were gone, recoverable only if someone
+ * thought to run `--backfill`. On the machine this was written for, three
+ * transcripts had been sitting on 410k unreported tokens, one of them for ten
+ * days. Anything still tracked whose file has grown past its offset is now
+ * picked up by whichever session next fires a hook. Age is not a reason to
+ * skip one: the portal accepts events up to 400 days old.
  *
- * Dropping an entry is safe in the direction that matters: a transcript that is
- * still around and later grows is re-read from byte zero, and the portal stores
- * none of it twice.
+ * Pruning shares the walk because it needs the same `stat` per transcript. It
+ * used to wait until 200 files had accumulated to avoid that walk — a
+ * threshold that in practice never tripped, so `state.json` only ever grew.
+ * The walk now happens anyway, and a few dozen stats is a rounding error
+ * beside the HTTP request at the end of the run.
+ *
+ * Freshest first, and capped: a run that drains `MAX_SWEEP_FILES` has done
+ * more than its share, and the next one resumes where it stopped. Dropping an
+ * entry stays safe in the direction that matters — a transcript that is still
+ * around and later grows is re-read from byte zero, and the portal stores none
+ * of it twice.
  */
-function pruneState(state) {
-  const files = Object.keys(state.files);
-  if (files.length <= PRUNE_ABOVE_FILES) return;
+function sweepTargets(state, explicit, sweep) {
   const cutoff = Date.now() - STATE_RETENTION_DAYS * 86_400_000;
-  for (const file of files) {
+  const stale = [];
+  for (const [file, entry] of Object.entries(state.files)) {
+    let stat;
     try {
-      if (fs.statSync(file).mtimeMs < cutoff) delete state.files[file];
+      stat = fs.statSync(file);
     } catch {
       delete state.files[file]; // transcript deleted
+      continue;
     }
+    if (stat.mtimeMs < cutoff) {
+      delete state.files[file];
+      continue;
+    }
+    if (!sweep || explicit.includes(file)) continue;
+    if (stat.size > (entry.offset ?? 0)) stale.push({ file, mtimeMs: stat.mtimeMs });
   }
+
+  stale.sort((a, b) => b.mtimeMs - a.mtimeMs);
+  const picked = stale.slice(0, MAX_SWEEP_FILES);
+  if (stale.length > picked.length) {
+    log(`sweep: ${stale.length - picked.length} stale transcript(s) held over to the next run`);
+  }
+  return [...explicit, ...picked.map((s) => s.file)];
 }
 
 /**
- * Collect the events not yet reported from one transcript, advancing its offset.
+ * Read one transcript's new events and advance its offset.
  *
- * `seen` exists only to catch a duplicate that straddles a read boundary:
- * Claude Code writes one entry per content block, so a message split across
- * blocks repeats its `requestId` and its `usage` verbatim. The portal would
- * reject the repeat anyway — filtering here just saves the round trip.
+ * Deduplication used to happen here, against that transcript's own key list.
+ * It moved out to `report`, where one window spans every transcript — the only
+ * place a fork of an earlier session can be recognised for what it is.
  */
 function collect(state, file) {
-  const entry = state.files[file] ?? { offset: 0, seen: [] };
+  const entry = state.files[file] ?? { offset: 0 };
   const { events, offset, gone } = readNewEvents(file, entry.offset);
   if (gone) {
     delete state.files[file];
     return [];
   }
-
-  const seen = new Set(entry.seen ?? []);
-  const fresh = [];
-  for (const event of events) {
-    const key = keyOf(event);
-    if (seen.has(key)) continue;
-    seen.add(key);
-    fresh.push(event);
-  }
-
-  state.files[file] = {
-    offset,
-    seen: [...seen].slice(-SEEN_PER_FILE),
-  };
-  return fresh;
+  state.files[file] = { offset };
+  return events;
 }
 
 /** Every transcript touched in the last `days` days. */
@@ -508,7 +600,8 @@ function recentTranscripts(days) {
 
 /**
  * One reporting pass: whatever is owed from last time, plus whatever the given
- * transcripts have appended since.
+ * transcripts — and, with `sweep`, the ones nothing came back for — have
+ * appended since.
  *
  * Both durable writes happen **after** the upload, and in this order: the spool
  * (what is still owed) then the offsets (what has been read). Every crash window
@@ -521,33 +614,68 @@ function recentTranscripts(days) {
  * the spool now; not advancing is what would make the same lines be read for
  * ever.
  */
-async function report(config, files) {
-  const pending = readSpool();
-
+async function report(config, files, { sweep = false } = {}) {
   const state = loadState();
-  const fresh = [];
-  for (const file of files) fresh.push(...collect(state, file));
+  const carried = state.carried ?? [];
+  delete state.carried;
 
+  const targets = sweepTargets(state, files, sweep);
+  const stateBefore = JSON.stringify(state, null, 2);
+
+  const found = [];
+  for (const file of targets) found.push(...collect(state, file));
+
+  // The dedup window is only read when there is something to check against it,
+  // which leaves a hook with no new turns at a stat per tracked transcript and
+  // no large file touched at all.
+  let fresh = found;
+  let dedupWindow = null;
+  let added = [];
+  if (found.length > 0 || carried.length > 0) {
+    dedupWindow = [...readSeen(), ...carried];
+    added = [...carried];
+    const seen = new Set(dedupWindow);
+    fresh = [];
+    for (const event of found) {
+      const key = keyOf(event);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      dedupWindow.push(key);
+      added.push(key);
+      fresh.push(event);
+    }
+  }
+  const known = found.length - fresh.length;
+
+  // Offsets and dedup keys are recorded together, and only once the upload has
+  // had its say. Writing `state.json` unconditionally was the one cost this
+  // plugin paid on a turn where it had nothing to do.
+  const persist = () => {
+    if (dedupWindow) persistSeen(dedupWindow, added);
+    const stateAfter = JSON.stringify(state, null, 2);
+    if (stateAfter !== stateBefore) writeTextAtomic(STATE_FILE, stateAfter);
+  };
+
+  const pending = readSpool();
   const all = [...pending, ...fresh];
   if (all.length === 0) {
     // Still record the offsets: the lines just read were real, they simply
     // held no usage (user turns, tool results), and re-reading them is waste.
-    pruneState(state);
-    writeJsonAtomic(STATE_FILE, state);
-    return { sent: 0, accepted: 0, duplicates: 0, rejected: 0, spooled: 0 };
+    persist();
+    return { sent: 0, accepted: 0, duplicates: 0, rejected: 0, spooled: 0, known };
   }
 
   const { tally, failed } = await upload(config, all);
   writeSpool(failed);
-  pruneState(state);
-  writeJsonAtomic(STATE_FILE, state);
+  persist();
 
   log(
-    `reported ${tally.sent} event(s) from ${files.length} transcript(s): ` +
+    `reported ${tally.sent} event(s) from ${targets.length} transcript(s): ` +
       `${tally.accepted} accepted, ${tally.duplicates} duplicate, ` +
-      `${tally.rejected} rejected, ${tally.spooled} spooled`,
+      `${tally.rejected} rejected, ${tally.spooled} spooled` +
+      (known > 0 ? `, ${known} skipped as already sent` : ""),
   );
-  return tally;
+  return { ...tally, known };
 }
 
 // ---------------------------------------------------------------------------
@@ -579,6 +707,23 @@ async function status(config) {
   const state = loadState();
   const spool = readSpool();
   const problem = configProblem(config);
+
+  // What the next hook's sweep will pick up. Reported because a number here is
+  // the difference between "nothing to do" and usage that has not been sent.
+  let waitingFiles = 0;
+  let waitingBytes = 0;
+  for (const [file, entry] of Object.entries(state.files)) {
+    try {
+      const size = fs.statSync(file).size;
+      if (size > (entry.offset ?? 0)) {
+        waitingFiles += 1;
+        waitingBytes += size - (entry.offset ?? 0);
+      }
+    } catch {
+      /* transcript deleted; the next run forgets it */
+    }
+  }
+
   const lines = [
     "jyl-usage — Claude Code → llm-web usage reporter",
     "",
@@ -588,8 +733,10 @@ async function status(config) {
     `  config file: ${CONFIG_FILE}${fs.existsSync(CONFIG_FILE) ? "" : " (absent)"}`,
     `  status:      ${problem ? `NOT reporting — ${problem}` : "ready"}`,
     "",
-    `  transcripts tracked: ${Object.keys(state.files).length}`,
+    `  transcripts tracked:   ${Object.keys(state.files).length}`,
+    `  unread tails:          ${waitingFiles} transcript(s), ${waitingBytes} byte(s) — the next hook sweeps these`,
     `  events awaiting retry: ${spool.length}`,
+    `  dedup window:          ${readSeen().length} key(s)`,
   ];
   if (alreadyMeteredByPortal(config) && !config.reportGatewayTraffic) {
     lines.push(
@@ -652,11 +799,14 @@ async function main() {
     return;
   }
 
-  // Default: the hook path. One transcript, whatever Claude Code just told us
-  // about. Anything else on disk is the backfill command's job.
+  // Default: the hook path — the transcript Claude Code just named, plus a
+  // catch-up sweep over the ones already tracked that have grown since anything
+  // last read them. The sweep is why this is the path that changed: a lost lock
+  // or a session that never reached SessionEnd used to strand a turn for good,
+  // and `--backfill` only helped the people who knew to run it.
   const hook = await readHookInput();
   const transcript = typeof hook.transcript_path === "string" ? hook.transcript_path : null;
-  await withLock(() => report(config, transcript ? [transcript] : []));
+  await withLock(() => report(config, transcript ? [transcript] : [], { sweep: true }));
 }
 
 main().catch((err) => {

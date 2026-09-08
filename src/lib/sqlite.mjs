@@ -57,13 +57,13 @@ export function sqliteBackend() {
   return pickBackend()?.kind ?? null;
 }
 
-export function readGenMetadata(dbFile, afterIdx) {
-  if (!fs.existsSync(dbFile)) return [];
-  const backend = pickBackend();
-  if (!backend) return null;
-
-  if (backend.kind === "bun") {
-    const db = new backend.Database(dbFile, { readonly: true });
+/**
+ * Read from `gen_metadata` using bun's built-in sqlite.
+ * Returns null if the database is corrupt, locked, or has no table.
+ */
+export function readViaBun(Database, dbFile, afterIdx) {
+  try {
+    const db = new Database(dbFile, { readonly: true });
     try {
       return db
         .query(SQL)
@@ -72,10 +72,18 @@ export function readGenMetadata(dbFile, afterIdx) {
     } finally {
       db.close();
     }
+  } catch {
+    return null;
   }
+}
 
-  if (backend.kind === "node") {
-    const db = new backend.DatabaseSync(dbFile, { readOnly: true });
+/**
+ * Read from `gen_metadata` using node's built-in sqlite (v22.5+).
+ * Returns null if the database is corrupt, locked, or has no table.
+ */
+export function readViaNode(DatabaseSync, dbFile, afterIdx) {
+  try {
+    const db = new DatabaseSync(dbFile, { readOnly: true });
     try {
       return db
         .prepare(SQL)
@@ -84,24 +92,58 @@ export function readGenMetadata(dbFile, afterIdx) {
     } finally {
       db.close();
     }
+  } catch {
+    return null;
   }
+}
 
-  // The CLI cannot hand back binary, so the blob comes over as hex.
-  const out = execFileSync(
-    "sqlite3",
-    ["-readonly", "-noheader", "-list", "-separator", "|", dbFile,
-     `SELECT idx, hex(data) FROM gen_metadata WHERE idx > ${Number(afterIdx) || 0} ORDER BY idx ASC`],
-    { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 },
-  );
-  const rows = [];
-  for (const line of out.split("\n")) {
-    if (!line.trim()) continue;
-    const sep = line.indexOf("|");
-    if (sep < 0) continue;
-    rows.push({
-      idx: Number(line.slice(0, sep)),
-      data: new Uint8Array(Buffer.from(line.slice(sep + 1), "hex")),
-    });
+/**
+ * Read from `gen_metadata` using the system `sqlite3` CLI.
+ * Returns null if the database is corrupt, locked, or has no table.
+ */
+export function readViaCli(dbFile, afterIdx) {
+  try {
+    // The CLI cannot hand back binary, so the blob comes over as hex.
+    const out = execFileSync(
+      "sqlite3",
+      ["-readonly", "-noheader", "-list", "-separator", "|", dbFile,
+       `SELECT idx, hex(data) FROM gen_metadata WHERE idx > ${Number(afterIdx) || 0} ORDER BY idx ASC`],
+      { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 },
+    );
+    const rows = [];
+    for (const line of out.split("\n")) {
+      if (!line.trim()) continue;
+      const sep = line.indexOf("|");
+      if (sep < 0) continue;
+      rows.push({
+        idx: Number(line.slice(0, sep)),
+        data: new Uint8Array(Buffer.from(line.slice(sep + 1), "hex")),
+      });
+    }
+    return rows;
+  } catch {
+    return null;
   }
-  return rows;
+}
+
+export function readGenMetadata(dbFile, afterIdx) {
+  if (!fs.existsSync(dbFile)) return [];
+  const backend = pickBackend();
+  if (!backend) return null;
+
+  try {
+    if (backend.kind === "bun") {
+      return readViaBun(backend.Database, dbFile, afterIdx);
+    }
+    if (backend.kind === "node") {
+      return readViaNode(backend.DatabaseSync, dbFile, afterIdx);
+    }
+    if (backend.kind === "cli") {
+      return readViaCli(dbFile, afterIdx);
+    }
+  } catch {
+    // A read failure means the database is unavailable, locked, or corrupt;
+    // return null so the caller leaves the cursor unadvanced and retries later.
+  }
+  return null;
 }

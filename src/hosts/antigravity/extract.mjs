@@ -14,11 +14,15 @@
  * `MODEL_PLACEHOLDER_M318` in the same blob's key/value table). Mistaking it for
  * input tokens would have added a fixed 1318 to every request.
  *
- * Because the mapping is inferred, it is checked rather than trusted: the
- * output total must equal thinking plus text. A future `agy` that renumbers
- * these fields makes the check fail, and a failed check means the row is
- * skipped — under-reporting, which `--status` shows, instead of wrong numbers,
- * which nobody would notice.
+ * Because the mapping is inferred, it is checked rather than trusted:
+ * 1. The output total must equal thinking plus text (fields 3, 9, 10) — this
+ *    catches drift in the output triad.
+ * 2. Every varint field number in the counts message must be from the known set
+ *    {1, 2, 3, 5, 9, 10} — this catches renumbering that introduces new fields.
+ * 3. Neither guard catches a permutation among the six known field numbers.
+ *
+ * A failed check means the row is skipped — under-reporting, which `--status`
+ * shows, instead of wrong numbers, which nobody would notice.
  */
 
 import { scan } from "../../lib/protobuf.mjs";
@@ -26,6 +30,9 @@ import { scan } from "../../lib/protobuf.mjs";
 const USAGE_PATHS = ["1.4", "1.17.2"];
 const MODEL_PATH = "1.19";
 const PAIRS_PATH = "1.20";
+
+/** Every varint field number we have ever seen in a counts message. */
+const KNOWN_USAGE_FIELDS = new Set([1, 2, 3, 5, 9, 10]);
 
 const int = (v) => (typeof v === "number" && Number.isFinite(v) && v > 0 ? Math.round(v) : 0);
 
@@ -42,6 +49,19 @@ export function pairsFrom(sc) {
 
 function usageFrom(sc) {
   for (const base of USAGE_PATHS) {
+    // Check that all field numbers are from the known set.
+    const prefix = `${base}.`;
+    const presentFields = [...sc.varints.keys()]
+      .filter((k) => k.startsWith(prefix))
+      .map((k) => {
+        const remainder = k.substring(prefix.length);
+        const parts = remainder.split(".");
+        // Only count direct children (single number segment)
+        return parts.length === 1 ? parseInt(remainder, 10) : null;
+      })
+      .filter((f) => f !== null);
+    if (presentFields.some((f) => !KNOWN_USAGE_FIELDS.has(f))) continue;
+
     const at = (field) => int(sc.varints.get(`${base}.${field}`)?.[0]);
     const total = at(3);
     const thinking = at(9);
@@ -55,7 +75,9 @@ function usageFrom(sc) {
   return null;
 }
 
-export function eventFromBlob(data, { ts }) {
+export function eventFromBlob(data, { ts } = {}) {
+  if (!ts) return null;
+
   const sc = scan(data);
 
   const model = sc.strings.get(MODEL_PATH)?.[0]?.trim();
@@ -66,7 +88,6 @@ export function eventFromBlob(data, { ts }) {
 
   const usage = usageFrom(sc);
   if (!usage) return null;
-  if (usage.input + usage.cached + usage.output === 0) return null;
 
   return {
     requestId,

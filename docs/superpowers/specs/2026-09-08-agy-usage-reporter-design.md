@@ -182,11 +182,15 @@ was last advanced, newest first, capped per run, exactly as the Claude Code host
 sweeps transcripts.
 
 Field extraction is by **structural signature with invariants**, not by trusting
-field numbers alone: a candidate usage message must satisfy `f3 == f9 + f10` and
-sit in a blob from which a model-id string was also recovered. A row failing the
-invariants is skipped and logged, never guessed at. The consequence of `agy`
-changing its protobuf is under-reporting, which is visible in `--status`, rather
-than fabricated numbers in the portal.
+field numbers alone. A candidate usage message is checked by two guards:
+1. The output total must equal thinking plus text (`f3 == f9 + f10`) — this catches
+   drift in the output triad if `agy` renumbers those three fields.
+2. Every varint field number in the counts message must be from the known set
+   {1, 2, 3, 5, 9, 10} — this catches renumbering that introduces new fields.
+3. Neither guard catches a permutation among the six known field numbers.
+A row failing either guard is skipped and logged, never guessed at. The
+consequence of `agy` changing its protobuf is under-reporting, which is visible
+in `--status`, rather than fabricated numbers in the portal.
 
 SQLite access, in order, first that works: `bun:sqlite`, `node:sqlite`, the
 system `sqlite3` binary, otherwise skip and log. Databases are opened read-only;
@@ -293,9 +297,11 @@ The repo has no test runner today (`node --check` is the whole build). This adds
    `last_step_index` and the suffix of its `request_id` both equal `idx`. The
    join is exact. The database-mtime fallback stays for conversations whose
    transcript is missing or half-written.
-4. **Field-number confirmation.** The mapping above is inferred from three
-   conversations. Confirm against a controlled run — one prompt, known
-   approximate size — before trusting `cacheReadTokens` in particular.
+4. **Field-number confirmation.** Step 5 extracted 168 generations from one active
+   conversation on the development machine. Eight other databases held zero rows.
+   All 168 rows yielded valid events; none were skipped by the invariant checks.
+   Total: 24.7M tokens. A cross-check against `agy`'s own `/usage` panel to
+   validate these counts moves to Task 11.
 5. **Claude models under Antigravity.** The blob carries `used_claude` and
    `used_non_gemini_model` flags, so `agy` can spend non-Gemini models. The model
    string handles it; no special case is expected, but it is untested.

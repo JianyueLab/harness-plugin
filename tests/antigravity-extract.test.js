@@ -77,4 +77,50 @@ describe("eventFromBlob", () => {
     const event = eventFromBlob(blob({ model: "claude-sonnet-5" }), { ts: TS });
     expect(event.model).toBe("claude-sonnet-5");
   });
+
+  test("skips a row with no model, which could never be reported", () => {
+    const noModel = msg(
+      bytes(1, msg(
+        bytes(4, msg(vint(1, 1318), vint(2, 3507), vint(3, 2729), vint(5, 82207), vint(9, 993), vint(10, 1736))),
+        bytes(20, msg(str(1, "request_id"), str(2, "traj-0"))),
+      )),
+    );
+    expect(eventFromBlob(noModel, { ts: TS })).toBeNull();
+  });
+
+  test("reads counts from the 1.17.2 fallback path", () => {
+    const fallback = msg(
+      bytes(1, msg(
+        bytes(17, msg(bytes(2, msg(vint(1, 1318), vint(2, 1000), vint(3, 500), vint(9, 200), vint(10, 300))))),
+        str(19, "gemini-3.8-flash"),
+        bytes(20, msg(str(1, "request_id"), str(2, "traj-fb"))),
+      )),
+    );
+    const event = eventFromBlob(fallback, { ts: TS });
+    expect(event).toEqual({
+      requestId: "traj-fb",
+      ts: TS,
+      model: "gemini-3.8-flash",
+      inputTokens: 1000,
+      outputTokens: 500,
+      cacheWrite5mTokens: 0,
+      cacheWrite1hTokens: 0,
+      cacheReadTokens: 0,
+    });
+  });
+
+  test("skips a row with an unrecognised field number in the counts message", () => {
+    const unknown = msg(
+      bytes(1, msg(
+        bytes(4, msg(vint(1, 1318), vint(2, 3507), vint(3, 2729), vint(5, 82207), vint(7, 123), vint(9, 993), vint(10, 1736))),
+        str(19, "gemini-3.8-flash"),
+        bytes(20, msg(str(1, "request_id"), str(2, "traj-unk"))),
+      )),
+    );
+    expect(eventFromBlob(unknown, { ts: TS })).toBeNull();
+  });
+
+  test("returns null if called without a timestamp", () => {
+    expect(eventFromBlob(blob())).toBeNull();
+  });
 });

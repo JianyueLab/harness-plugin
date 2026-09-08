@@ -1,0 +1,11 @@
+{
+  "jyl-usage": {
+    "Stop": [
+      {
+        "type": "command",
+        "command": "./scripts/run --host antigravity --detach",
+        "timeout": 10
+      }
+    ]
+  }
+}

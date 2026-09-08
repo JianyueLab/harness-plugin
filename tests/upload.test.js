@@ -48,6 +48,14 @@ test("drops a payload no retry could fix", async () => {
   expect(failed).toHaveLength(0);
 });
 
+test("spools a 400 that names the source as the problem, rather than dropping it", async () => {
+  globalThis.fetch = async () =>
+    new Response("`source` must be one of: claude-code, grok-build", { status: 400 });
+  const { failed, tally } = await upload(ctx, events(3));
+  expect(failed).toHaveLength(3);
+  expect(tally.spooled).toBe(3);
+});
+
 test("spools when the network fails", async () => {
   globalThis.fetch = async () => { throw new Error("ECONNREFUSED"); };
   const { failed } = await upload(ctx, events(2));

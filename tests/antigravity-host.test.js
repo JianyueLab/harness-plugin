@@ -67,8 +67,16 @@ test("reads nothing twice", () => {
 
 test("falls back to the database mtime when the transcript has no such step", () => {
   const file = conversation("c3", [5], []);
+  // Days in the past, not "moments ago" — a fixture created just before the
+  // assertion would let a regression to `new Date().toISOString()` pass too.
+  const past = Date.now() - 5 * 86_400_000;
+  fs.utimesSync(file, past / 1000, past / 1000);
+  const stat = fs.statSync(file);
+
   const event = host.read(file, {}).events[0];
-  expect(Date.parse(event.ts)).toBeCloseTo(fs.statSync(file).mtimeMs, -3);
+
+  expect(Date.parse(event.ts)).toBeCloseTo(stat.mtimeMs, -3);
+  expect(Date.now() - Date.parse(event.ts)).toBeGreaterThan(4 * 86_400_000);
 });
 
 test("probe reports pending work only when the database has moved", () => {

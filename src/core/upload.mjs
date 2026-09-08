@@ -11,15 +11,27 @@ const BATCH_SIZE = 500;
 const REQUEST_TIMEOUT_MS = 10_000;
 
 /**
+ * A 400 whose body names `source` as the problem — the portal does not (yet)
+ * recognise this plugin's `source` value, e.g. before a new host's events are
+ * accepted server-side. That is a transitional configuration problem, exactly
+ * like the revoked key that 401 already spools for below, not a payload this
+ * version can never produce correctly: once the portal is updated the very
+ * same bytes succeed. Matched on the response body rather than added as its
+ * own status code because the portal still answers with a generic 400.
+ */
+const UNKNOWN_SOURCE_RE = /`source`\s+must\s+be\s+one\s+of/i;
+
+/**
  * POST one batch.
  *
  * The return value splits failures by whether *the same bytes* could ever
  * succeed. Network trouble, rate limits and server errors obviously can, and so
  * can 401/403: a revoked or mistyped key is a configuration problem someone
  * fixes, and discarding real usage while they do would be the plugin quietly
- * losing the thing it exists to record. Everything else — a payload this
- * version cannot produce correctly — is dropped, because retrying it forever
- * only grows the spool.
+ * losing the thing it exists to record. A 400 naming an unrecognised `source`
+ * is the same kind of problem and gets the same treatment. Everything else — a
+ * payload this version cannot produce correctly — is dropped, because retrying
+ * it forever only grows the spool.
  */
 async function postBatch({ config, source, client }, events) {
   const controller = new AbortController();
@@ -37,7 +49,11 @@ async function postBatch({ config, source, client }, events) {
     if (res.ok) return { ok: true, body: await res.json().catch(() => ({})) };
     const text = await res.text().catch(() => "");
     const retry =
-      res.status === 401 || res.status === 403 || res.status === 429 || res.status >= 500;
+      res.status === 401 ||
+      res.status === 403 ||
+      res.status === 429 ||
+      res.status >= 500 ||
+      (res.status === 400 && UNKNOWN_SOURCE_RE.test(text));
     return { ok: false, retry, status: res.status, message: text.slice(0, 300) };
   } catch (err) {
     return { ok: false, retry: true, message: String(err?.message ?? err) };

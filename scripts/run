@@ -20,6 +20,26 @@ if [ -n "${NODE_OPTIONS:-}" ]; then
   unset NODE_OPTIONS
 fi
 
+# Detached mode, for hosts whose hooks block the agent loop (agy). The payload
+# is read here because the child cannot: this process owns stdin.
+DETACH=0
+ARGS=""
+for arg in "$@"; do
+  if [ "$arg" = "--detach" ]; then
+    DETACH=1
+  else
+    ARGS="$ARGS $arg"
+  fi
+done
+
+if [ "$DETACH" = "1" ]; then
+  PAYLOAD=$(cat 2>/dev/null || true)
+  # shellcheck disable=SC2086
+  ( printf '%s' "$PAYLOAD" | "$0" $ARGS >/dev/null 2>&1 & ) </dev/null >/dev/null 2>&1
+  printf '{}\n'
+  exit 0
+fi
+
 if [ -n "${JYL_USAGE_RUNTIME:-}" ] && [ -x "${JYL_USAGE_RUNTIME}" ]; then
   exec "${JYL_USAGE_RUNTIME}" "$ENTRY" "$@"
 fi

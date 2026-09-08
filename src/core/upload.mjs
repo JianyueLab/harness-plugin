@@ -11,15 +11,36 @@ const BATCH_SIZE = 500;
 const REQUEST_TIMEOUT_MS = 10_000;
 
 /**
- * A 400 whose body names `source` as the problem — the portal does not (yet)
+ * A 400 identifying `source` as the problem — the portal does not (yet)
  * recognise this plugin's `source` value, e.g. before a new host's events are
  * accepted server-side. That is a transitional configuration problem, exactly
  * like the revoked key that 401 already spools for below, not a payload this
  * version can never produce correctly: once the portal is updated the very
- * same bytes succeed. Matched on the response body rather than added as its
- * own status code because the portal still answers with a generic 400.
+ * same bytes succeed.
+ *
+ * Checked two ways, in that order. The machine-readable one first: llm-web's
+ * ingest route answers with an OpenAI-shaped error body and sets
+ * `error.code: "invalid_source"` (`src/server/routes/v1.ts`), and that field
+ * is what actually gets matched. Matching prose instead would fail in exactly
+ * the direction this fail-safe exists to guard against — a copy edit to the
+ * portal's error message would silently stop the match, the batch would
+ * revert to dropped, and the spend would be lost. The prose regex survives
+ * only as a fallback for an older portal build whose response predates the
+ * `code` field. Parsing never throws: a 400 with an empty or non-JSON body
+ * just falls through to the fallback (and, failing that, to "drop").
  */
+const UNKNOWN_SOURCE_CODE = "invalid_source";
 const UNKNOWN_SOURCE_RE = /`source`\s+must\s+be\s+one\s+of/i;
+
+function isUnknownSourceError(text) {
+  try {
+    const body = JSON.parse(text);
+    if (body && typeof body === "object" && body.error?.code === UNKNOWN_SOURCE_CODE) return true;
+  } catch {
+    /* not JSON: fall through to the prose match below */
+  }
+  return UNKNOWN_SOURCE_RE.test(text);
+}
 
 /**
  * POST one batch.
@@ -53,7 +74,7 @@ async function postBatch({ config, source, client }, events) {
       res.status === 403 ||
       res.status === 429 ||
       res.status >= 500 ||
-      (res.status === 400 && UNKNOWN_SOURCE_RE.test(text));
+      (res.status === 400 && isUnknownSourceError(text));
     return { ok: false, retry, status: res.status, message: text.slice(0, 300) };
   } catch (err) {
     return { ok: false, retry: true, message: String(err?.message ?? err) };

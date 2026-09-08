@@ -48,12 +48,44 @@ test("drops a payload no retry could fix", async () => {
   expect(failed).toHaveLength(0);
 });
 
-test("spools a 400 that names the source as the problem, rather than dropping it", async () => {
-  globalThis.fetch = async () =>
-    new Response("`source` must be one of: claude-code, grok-build", { status: 400 });
+test("spools a 400 whose error.code is invalid_source, even when the message is reworded", async () => {
+  // The case that matters: prose alone would not catch this, because the
+  // message no longer contains "must be one of". The machine-readable code
+  // is what has to carry it.
+  const body = JSON.stringify({
+    error: {
+      message: "The `source` field names a host this portal does not accept yet.",
+      type: "invalid_request_error",
+      code: "invalid_source",
+      param: null,
+    },
+  });
+  globalThis.fetch = async () => new Response(body, { status: 400 });
   const { failed, tally } = await upload(ctx, events(3));
   expect(failed).toHaveLength(3);
   expect(tally.spooled).toBe(3);
+});
+
+test("spools a 400 with today's prose message but no error.code, via the fallback match", async () => {
+  // An older portal build whose response predates the `code` field.
+  const body = JSON.stringify({
+    error: {
+      message: "`source` must be one of: claude-code, grok-build.",
+      type: "invalid_request_error",
+      code: null,
+      param: null,
+    },
+  });
+  globalThis.fetch = async () => new Response(body, { status: 400 });
+  const { failed, tally } = await upload(ctx, events(3));
+  expect(failed).toHaveLength(3);
+  expect(tally.spooled).toBe(3);
+});
+
+test("a 400 with an empty body does not throw, and is dropped like any other unmatched 400", async () => {
+  globalThis.fetch = async () => new Response("", { status: 400 });
+  const { failed } = await upload(ctx, events(2));
+  expect(failed).toHaveLength(0);
 });
 
 test("spools when the network fails", async () => {

@@ -34,6 +34,11 @@ done
 
 if [ "$DETACH" = "1" ]; then
   PAYLOAD=$(cat 2>/dev/null || true)
+  # $ARGS is intentionally unquoted: it re-splits on whitespace, which is only
+  # safe because the sole caller is hooks.json's fixed "--host antigravity"
+  # (no path or other argument that could contain a space or glob character
+  # reaches this branch). Quoting it would pass one literal " --host
+  # antigravity" token instead of two.
   # shellcheck disable=SC2086
   ( printf '%s' "$PAYLOAD" | "$0" $ARGS >/dev/null 2>&1 & ) </dev/null >/dev/null 2>&1
   printf '{}\n'

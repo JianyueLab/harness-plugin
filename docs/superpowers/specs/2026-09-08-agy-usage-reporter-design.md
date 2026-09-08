@@ -286,10 +286,13 @@ The repo has no test runner today (`node --check` is the whole build). This adds
    writing install instructions.
 2. **`plugin.json` fields.** Only `name` is documented. Confirm `agy` tolerates
    `description`/`version` rather than failing to parse.
-3. **Step-index join for `ts`.** `gen_metadata.idx` and `transcript.jsonl`'s
-   `step_index` are not the same sequence (85 generations across 174 steps in the
-   sample); the `request_id` suffix matches `idx`. Confirm the mapping, or use the
-   fallback unconditionally.
+3. ~~**Step-index join for `ts`.**~~ **Resolved while writing the plan.**
+   `gen_metadata.idx` *is* the transcript's `step_index` — both tables in the
+   database are keyed on it, steps 40 and 84 of the sample conversation are
+   `source: MODEL` entries carrying `created_at`, and the blob's own
+   `last_step_index` and the suffix of its `request_id` both equal `idx`. The
+   join is exact. The database-mtime fallback stays for conversations whose
+   transcript is missing or half-written.
 4. **Field-number confirmation.** The mapping above is inferred from three
    conversations. Confirm against a controlled run — one prompt, known
    approximate size — before trusting `cacheReadTokens` in particular.

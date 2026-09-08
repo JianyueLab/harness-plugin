@@ -14,6 +14,8 @@
 import { execFileSync } from "node:child_process";
 import { createRequire } from "node:module";
 import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 
 /**
  * `import()` is async and every caller here is on a synchronous path, so the two
@@ -126,24 +128,114 @@ export function readViaCli(dbFile, afterIdx) {
   }
 }
 
+/**
+ * Copy a WAL-mode database to a temp location so it can be read even after
+ * agy has closed it and deleted the -wal and -shm files. Returns the path to
+ * the temp copy and three paths to clean up (which may not all exist).
+ *
+ * Copy order matters: .db first, then -wal, then -shm. If a checkpoint lands
+ * between the db and wal copy, the wal's salt no longer matches, which SQLite
+ * ignores — yielding a consistent, slightly stale read rather than a corrupt one.
+ *
+ * If the copy is missing the -shm file (because agy deleted it), we convert
+ * the database from WAL mode to DELETE mode so queries can proceed.
+ */
+function copyWalDatabase(dbFile, Database, DatabaseSync) {
+  const tmpPath = path.join(
+    os.tmpdir(),
+    `jyl-sqlite-read-${Math.random().toString(36).slice(2)}.db`,
+  );
+  const tmpWal = tmpPath + "-wal";
+  const tmpShm = tmpPath + "-shm";
+
+  // Copy .db first
+  fs.copyFileSync(dbFile, tmpPath);
+
+  // Copy -wal if it exists
+  const walFile = dbFile + "-wal";
+  if (fs.existsSync(walFile)) {
+    fs.copyFileSync(walFile, tmpWal);
+  }
+
+  // Copy -shm if it exists
+  const shmFile = dbFile + "-shm";
+  if (fs.existsSync(shmFile)) {
+    fs.copyFileSync(shmFile, tmpShm);
+  } else if (Database) {
+    // If -shm doesn't exist (agy closed the database), convert from WAL to DELETE mode
+    // so we can query the copy. This requires write access to the temp file.
+    try {
+      const db = new Database(tmpPath);
+      db.run("PRAGMA journal_mode = DELETE");
+      db.close();
+    } catch {
+      // If conversion fails, just proceed; the caller will get null from the query
+    }
+  }
+
+  return { tmpPath, tmpWal, tmpShm };
+}
+
 export function readGenMetadata(dbFile, afterIdx) {
   if (!fs.existsSync(dbFile)) return [];
   const backend = pickBackend();
   if (!backend) return null;
 
+  // Try direct read first
+  let result;
   try {
     if (backend.kind === "bun") {
-      return readViaBun(backend.Database, dbFile, afterIdx);
-    }
-    if (backend.kind === "node") {
-      return readViaNode(backend.DatabaseSync, dbFile, afterIdx);
-    }
-    if (backend.kind === "cli") {
-      return readViaCli(dbFile, afterIdx);
+      result = readViaBun(backend.Database, dbFile, afterIdx);
+    } else if (backend.kind === "node") {
+      result = readViaNode(backend.DatabaseSync, dbFile, afterIdx);
+    } else if (backend.kind === "cli") {
+      result = readViaCli(dbFile, afterIdx);
     }
   } catch {
     // A read failure means the database is unavailable, locked, or corrupt;
     // return null so the caller leaves the cursor unadvanced and retries later.
+    return null;
   }
-  return null;
+
+  // If direct read succeeded, return the result
+  if (result !== null) {
+    return result;
+  }
+
+  // Direct read failed. If this is a WAL-mode database that agy closed,
+  // copy it to a temp file and retry. If it's truly corrupt, the copy
+  // will also fail and return null.
+  const { tmpPath, tmpWal, tmpShm } = copyWalDatabase(
+    dbFile,
+    backend.kind === "bun" ? backend.Database : null,
+    backend.kind === "node" ? backend.DatabaseSync : null,
+  );
+  try {
+    if (backend.kind === "bun") {
+      return readViaBun(backend.Database, tmpPath, afterIdx);
+    } else if (backend.kind === "node") {
+      return readViaNode(backend.DatabaseSync, tmpPath, afterIdx);
+    } else if (backend.kind === "cli") {
+      return readViaCli(tmpPath, afterIdx);
+    }
+  } catch {
+    return null;
+  } finally {
+    // Clean up temp files, never let a failed delete throw
+    try {
+      fs.unlinkSync(tmpPath);
+    } catch {
+      /* ignore */
+    }
+    try {
+      fs.unlinkSync(tmpWal);
+    } catch {
+      /* ignore */
+    }
+    try {
+      fs.unlinkSync(tmpShm);
+    } catch {
+      /* ignore */
+    }
+  }
 }

@@ -157,3 +157,88 @@ test("readViaCli: reads rows and returns null on error", () => {
   db.close();
   expect(readViaCli(notab, 0)).toEqual(null);
 });
+
+// Task 2b tests: WAL mode databases and fallback copying
+
+test("readGenMetadata: reads WAL-mode database with -wal/-shm deleted (agy state)", () => {
+  const file = path.join(dir, "wal-closed.db");
+  const db = new Database(file, { create: true });
+  db.run("CREATE TABLE `gen_metadata` (`idx` integer, `data` blob, `size` integer NOT NULL DEFAULT 0, PRIMARY KEY (`idx`))");
+  db.run("PRAGMA journal_mode = WAL");
+  const insert = db.prepare("INSERT INTO gen_metadata (idx, data, size) VALUES (?, ?, ?)");
+  insert.run(1, Buffer.from([100, 101]), 2);
+  insert.run(3, Buffer.from([102, 103]), 2);
+  // Convert from WAL to DELETE mode to checkpoint data into .db file
+  db.run("PRAGMA journal_mode = DELETE");
+  db.close();
+
+  // Delete -wal and -shm files as agy does when closing
+  const walFile = file + "-wal";
+  const shmFile = file + "-shm";
+  if (fs.existsSync(walFile)) fs.unlinkSync(walFile);
+  if (fs.existsSync(shmFile)) fs.unlinkSync(shmFile);
+
+  // Should still read the database through fallback copy
+  const rows = readGenMetadata(file, 0);
+  expect(rows).not.toEqual(null);
+  expect(rows.map((r) => r.idx)).toEqual([1, 3]);
+});
+
+test("readGenMetadata: non-WAL database does not use fallback copy", () => {
+  const file = fixture("plain.db", [
+    [2, Buffer.from([110, 111])],
+    [4, Buffer.from([112, 113])],
+  ]);
+
+  const tmpdir = os.tmpdir();
+  const tmpsBefore = new Set(fs.readdirSync(tmpdir));
+
+  const rows = readGenMetadata(file, 0);
+  expect(rows.map((r) => r.idx)).toEqual([2, 4]);
+
+  // Verify no temp files were created (no fallback was needed)
+  const tmpsAfter = new Set(fs.readdirSync(tmpdir));
+  const created = [...tmpsAfter].filter((f) => !tmpsBefore.has(f));
+  const jylSqliteFiles = created.filter((f) => f.startsWith("jyl-sqlite-read-"));
+  expect(jylSqliteFiles.length).toEqual(0);
+});
+
+test("readGenMetadata: fallback copies are cleaned up", () => {
+  const file = path.join(dir, "wal-for-cleanup.db");
+  const db = new Database(file, { create: true });
+  db.run("CREATE TABLE `gen_metadata` (`idx` integer, `data` blob, `size` integer NOT NULL DEFAULT 0, PRIMARY KEY (`idx`))");
+  db.run("PRAGMA journal_mode = WAL");
+  const insert = db.prepare("INSERT INTO gen_metadata (idx, data, size) VALUES (?, ?, ?)");
+  insert.run(5, Buffer.from([120]), 1);
+  // Convert from WAL to DELETE mode to checkpoint data into .db file
+  db.run("PRAGMA journal_mode = DELETE");
+  db.close();
+
+  // Delete -wal and -shm files
+  const walFile = file + "-wal";
+  const shmFile = file + "-shm";
+  if (fs.existsSync(walFile)) fs.unlinkSync(walFile);
+  if (fs.existsSync(shmFile)) fs.unlinkSync(shmFile);
+
+  const tmpdir = os.tmpdir();
+  const tmpsBefore = new Set(fs.readdirSync(tmpdir));
+
+  const rows = readGenMetadata(file, 0);
+  expect(rows).not.toEqual(null);
+
+  // Check that no jyl-sqlite-read-* files remain
+  const tmpsAfter = new Set(fs.readdirSync(tmpdir));
+  const created = [...tmpsAfter].filter((f) => !tmpsBefore.has(f));
+  const jylSqliteFiles = created.filter((f) => f.startsWith("jyl-sqlite-read-"));
+  expect(jylSqliteFiles.length).toEqual(0);
+});
+
+test("readGenMetadata: corrupt database returns null even with fallback attempt", () => {
+  const file = path.join(dir, "corrupt-wal.db");
+  fs.writeFileSync(file, "not a database");
+  // Even if someone created fake -wal/-shm files, the corrupt db should fail
+  fs.writeFileSync(file + "-wal", "fake wal");
+  fs.writeFileSync(file + "-shm", "fake shm");
+
+  expect(readGenMetadata(file, 0)).toEqual(null);
+});

@@ -168,8 +168,8 @@ test("readGenMetadata: reads WAL-mode database with -wal/-shm deleted (agy state
   const insert = db.prepare("INSERT INTO gen_metadata (idx, data, size) VALUES (?, ?, ?)");
   insert.run(1, Buffer.from([100, 101]), 2);
   insert.run(3, Buffer.from([102, 103]), 2);
-  // Convert from WAL to DELETE mode to checkpoint data into .db file
-  db.run("PRAGMA journal_mode = DELETE");
+  // Checkpoint without converting journal mode, leaving the file in WAL mode
+  db.run("PRAGMA wal_checkpoint(TRUNCATE)");
   db.close();
 
   // Delete -wal and -shm files as agy does when closing
@@ -178,7 +178,8 @@ test("readGenMetadata: reads WAL-mode database with -wal/-shm deleted (agy state
   if (fs.existsSync(walFile)) fs.unlinkSync(walFile);
   if (fs.existsSync(shmFile)) fs.unlinkSync(shmFile);
 
-  // Should still read the database through fallback copy
+  // Assert both halves: direct read fails, readGenMetadata succeeds via fallback
+  expect(readViaBun(Database, file, 0)).toEqual(null);
   const rows = readGenMetadata(file, 0);
   expect(rows).not.toEqual(null);
   expect(rows.map((r) => r.idx)).toEqual([1, 3]);
@@ -210,8 +211,8 @@ test("readGenMetadata: fallback copies are cleaned up", () => {
   db.run("PRAGMA journal_mode = WAL");
   const insert = db.prepare("INSERT INTO gen_metadata (idx, data, size) VALUES (?, ?, ?)");
   insert.run(5, Buffer.from([120]), 1);
-  // Convert from WAL to DELETE mode to checkpoint data into .db file
-  db.run("PRAGMA journal_mode = DELETE");
+  // Checkpoint without converting journal mode, leaving the file in WAL mode
+  db.run("PRAGMA wal_checkpoint(TRUNCATE)");
   db.close();
 
   // Delete -wal and -shm files
@@ -223,6 +224,8 @@ test("readGenMetadata: fallback copies are cleaned up", () => {
   const tmpdir = os.tmpdir();
   const tmpsBefore = new Set(fs.readdirSync(tmpdir));
 
+  // Assert both halves: direct read fails, readGenMetadata succeeds via fallback
+  expect(readViaBun(Database, file, 0)).toEqual(null);
   const rows = readGenMetadata(file, 0);
   expect(rows).not.toEqual(null);
 
@@ -241,4 +244,45 @@ test("readGenMetadata: corrupt database returns null even with fallback attempt"
   fs.writeFileSync(file + "-shm", "fake shm");
 
   expect(readGenMetadata(file, 0)).toEqual(null);
+});
+
+test("readViaNode: read-write mode works when WAL files present", () => {
+  let DatabaseSync;
+  try {
+    DatabaseSync = req("node:sqlite").DatabaseSync;
+  } catch {
+    console.log("SKIP readViaNode readonly=false: node:sqlite not available");
+    return;
+  }
+
+  // Create a plain database (not WAL) with data
+  const file = path.join(dir, "node-plain.db");
+  const db = new Database(file, { create: true });
+  db.run("CREATE TABLE `gen_metadata` (`idx` integer, `data` blob, `size` integer NOT NULL DEFAULT 0, PRIMARY KEY (`idx`))");
+  const insert = db.prepare("INSERT INTO gen_metadata (idx, data, size) VALUES (?, ?, ?)");
+  insert.run(2, Buffer.from([40, 50]), 2);
+  insert.run(5, Buffer.from([60]), 1);
+  db.close();
+
+  // Test that node can read in read-write mode
+  const rows = readViaNode(DatabaseSync, file, 0, { readonly: false });
+  expect(rows).not.toEqual(null);
+  expect(rows.map((r) => r.idx)).toEqual([2, 5]);
+});
+
+test("readGenMetadata: copy that cannot be made returns null and leaves nothing", () => {
+  const tmpdir = os.tmpdir();
+  const tmpsBefore = new Set(fs.readdirSync(tmpdir));
+
+  // Pass a path that is a directory (exists but cannot be copied)
+  const dirPath = path.join(dir, "notadb");
+  fs.mkdirSync(dirPath);
+
+  expect(readGenMetadata(dirPath, 0)).toEqual(null);
+
+  // Verify no temp files were created
+  const tmpsAfter = new Set(fs.readdirSync(tmpdir));
+  const created = [...tmpsAfter].filter((f) => !tmpsBefore.has(f));
+  const jylSqliteFiles = created.filter((f) => f.startsWith("jyl-sqlite-read-"));
+  expect(jylSqliteFiles.length).toEqual(0);
 });

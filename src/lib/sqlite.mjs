@@ -63,9 +63,9 @@ export function sqliteBackend() {
  * Read from `gen_metadata` using bun's built-in sqlite.
  * Returns null if the database is corrupt, locked, or has no table.
  */
-export function readViaBun(Database, dbFile, afterIdx) {
+export function readViaBun(Database, dbFile, afterIdx, { readonly = true } = {}) {
   try {
-    const db = new Database(dbFile, { readonly: true });
+    const db = readonly ? new Database(dbFile, { readonly: true }) : new Database(dbFile);
     try {
       return db
         .query(SQL)
@@ -83,9 +83,9 @@ export function readViaBun(Database, dbFile, afterIdx) {
  * Read from `gen_metadata` using node's built-in sqlite (v22.5+).
  * Returns null if the database is corrupt, locked, or has no table.
  */
-export function readViaNode(DatabaseSync, dbFile, afterIdx) {
+export function readViaNode(DatabaseSync, dbFile, afterIdx, { readonly = true } = {}) {
   try {
-    const db = new DatabaseSync(dbFile, { readOnly: true });
+    const db = new DatabaseSync(dbFile, { readOnly: readonly });
     try {
       return db
         .prepare(SQL)
@@ -103,15 +103,17 @@ export function readViaNode(DatabaseSync, dbFile, afterIdx) {
  * Read from `gen_metadata` using the system `sqlite3` CLI.
  * Returns null if the database is corrupt, locked, or has no table.
  */
-export function readViaCli(dbFile, afterIdx) {
+export function readViaCli(dbFile, afterIdx, { readonly = true } = {}) {
   try {
     // The CLI cannot hand back binary, so the blob comes over as hex.
-    const out = execFileSync(
-      "sqlite3",
-      ["-readonly", "-noheader", "-list", "-separator", "|", dbFile,
-       `SELECT idx, hex(data) FROM gen_metadata WHERE idx > ${Number(afterIdx) || 0} ORDER BY idx ASC`],
-      { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 },
-    );
+    const args = [];
+    if (readonly) args.push("-readonly");
+    args.push("-noheader", "-list", "-separator", "|", dbFile);
+    args.push(`SELECT idx, hex(data) FROM gen_metadata WHERE idx > ${Number(afterIdx) || 0} ORDER BY idx ASC`);
+    const out = execFileSync("sqlite3", args, {
+      encoding: "utf8",
+      maxBuffer: 64 * 1024 * 1024,
+    });
     const rows = [];
     for (const line of out.split("\n")) {
       if (!line.trim()) continue;
@@ -128,68 +130,20 @@ export function readViaCli(dbFile, afterIdx) {
   }
 }
 
-/**
- * Copy a WAL-mode database to a temp location so it can be read even after
- * agy has closed it and deleted the -wal and -shm files. Returns the path to
- * the temp copy and three paths to clean up (which may not all exist).
- *
- * Copy order matters: .db first, then -wal, then -shm. If a checkpoint lands
- * between the db and wal copy, the wal's salt no longer matches, which SQLite
- * ignores — yielding a consistent, slightly stale read rather than a corrupt one.
- *
- * If the copy is missing the -shm file (because agy deleted it), we convert
- * the database from WAL mode to DELETE mode so queries can proceed.
- */
-function copyWalDatabase(dbFile, Database, DatabaseSync) {
-  const tmpPath = path.join(
-    os.tmpdir(),
-    `jyl-sqlite-read-${Math.random().toString(36).slice(2)}.db`,
-  );
-  const tmpWal = tmpPath + "-wal";
-  const tmpShm = tmpPath + "-shm";
-
-  // Copy .db first
-  fs.copyFileSync(dbFile, tmpPath);
-
-  // Copy -wal if it exists
-  const walFile = dbFile + "-wal";
-  if (fs.existsSync(walFile)) {
-    fs.copyFileSync(walFile, tmpWal);
-  }
-
-  // Copy -shm if it exists
-  const shmFile = dbFile + "-shm";
-  if (fs.existsSync(shmFile)) {
-    fs.copyFileSync(shmFile, tmpShm);
-  } else if (Database) {
-    // If -shm doesn't exist (agy closed the database), convert from WAL to DELETE mode
-    // so we can query the copy. This requires write access to the temp file.
-    try {
-      const db = new Database(tmpPath);
-      db.run("PRAGMA journal_mode = DELETE");
-      db.close();
-    } catch {
-      // If conversion fails, just proceed; the caller will get null from the query
-    }
-  }
-
-  return { tmpPath, tmpWal, tmpShm };
-}
-
 export function readGenMetadata(dbFile, afterIdx) {
   if (!fs.existsSync(dbFile)) return [];
   const backend = pickBackend();
   if (!backend) return null;
 
-  // Try direct read first
+  // Try direct read first (read-only against agy's original)
   let result;
   try {
     if (backend.kind === "bun") {
-      result = readViaBun(backend.Database, dbFile, afterIdx);
+      result = readViaBun(backend.Database, dbFile, afterIdx, { readonly: true });
     } else if (backend.kind === "node") {
-      result = readViaNode(backend.DatabaseSync, dbFile, afterIdx);
+      result = readViaNode(backend.DatabaseSync, dbFile, afterIdx, { readonly: true });
     } else if (backend.kind === "cli") {
-      result = readViaCli(dbFile, afterIdx);
+      result = readViaCli(dbFile, afterIdx, { readonly: true });
     }
   } catch {
     // A read failure means the database is unavailable, locked, or corrupt;
@@ -203,39 +157,51 @@ export function readGenMetadata(dbFile, afterIdx) {
   }
 
   // Direct read failed. If this is a WAL-mode database that agy closed,
-  // copy it to a temp file and retry. If it's truly corrupt, the copy
-  // will also fail and return null.
-  const { tmpPath, tmpWal, tmpShm } = copyWalDatabase(
-    dbFile,
-    backend.kind === "bun" ? backend.Database : null,
-    backend.kind === "node" ? backend.DatabaseSync : null,
+  // copy it to a temp file and read it in read-write mode so SQLite can
+  // create the shared-memory files it needs. If it's truly corrupt, the
+  // copy will also fail and return null. All filesystem operations are
+  // guarded by this try/catch/finally to ensure cleanup and never throw.
+  const tmpPath = path.join(
+    os.tmpdir(),
+    `jyl-sqlite-read-${Math.random().toString(36).slice(2)}.db`,
   );
+  const tmpWal = tmpPath + "-wal";
+  const tmpShm = tmpPath + "-shm";
+
   try {
+    // Copy .db first, then -wal, then -shm. This order ensures consistency
+    // if a checkpoint lands between the db and wal copy.
+    fs.copyFileSync(dbFile, tmpPath);
+    const walFile = dbFile + "-wal";
+    if (fs.existsSync(walFile)) {
+      fs.copyFileSync(walFile, tmpWal);
+    }
+    const shmFile = dbFile + "-shm";
+    if (fs.existsSync(shmFile)) {
+      fs.copyFileSync(shmFile, tmpShm);
+    }
+
+    // Read the copy in read-write mode. SQLite will create the shared-memory
+    // files it needs, and all three backends work this way.
     if (backend.kind === "bun") {
-      return readViaBun(backend.Database, tmpPath, afterIdx);
+      return readViaBun(backend.Database, tmpPath, afterIdx, { readonly: false });
     } else if (backend.kind === "node") {
-      return readViaNode(backend.DatabaseSync, tmpPath, afterIdx);
+      return readViaNode(backend.DatabaseSync, tmpPath, afterIdx, { readonly: false });
     } else if (backend.kind === "cli") {
-      return readViaCli(tmpPath, afterIdx);
+      return readViaCli(tmpPath, afterIdx, { readonly: false });
     }
   } catch {
+    // Copy failed or read failed; either way return null.
     return null;
   } finally {
-    // Clean up temp files, never let a failed delete throw
-    try {
-      fs.unlinkSync(tmpPath);
-    } catch {
-      /* ignore */
-    }
-    try {
-      fs.unlinkSync(tmpWal);
-    } catch {
-      /* ignore */
-    }
-    try {
-      fs.unlinkSync(tmpShm);
-    } catch {
-      /* ignore */
+    // Clean up all temp files, never let a failed delete throw.
+    // The read-write open may have created -wal and -shm companions.
+    for (const file of [tmpPath, tmpWal, tmpShm]) {
+      try {
+        fs.unlinkSync(file);
+      } catch {
+        /* ignore */
+      }
     }
   }
 }

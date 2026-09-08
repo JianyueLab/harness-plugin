@@ -34,9 +34,10 @@ import { configFiles, configProblem, loadConfig, redactKey } from "./core/config
 import { report } from "./core/report.mjs";
 import { createStore } from "./core/store.mjs";
 import { host as claudeCode } from "./hosts/claude-code.mjs";
+import { host as antigravity } from "./hosts/antigravity.mjs";
 
 /** Every host this reporter knows how to read. `--host` names one. */
-const HOSTS = { "claude-code": claudeCode };
+const HOSTS = { "claude-code": claudeCode, antigravity };
 
 /** Units touched within this many days are in scope for `--backfill`. */
 const DEFAULT_BACKFILL_DAYS = 30;

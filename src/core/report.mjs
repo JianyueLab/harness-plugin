@@ -15,6 +15,15 @@
  * tail is a partial line that will never gain its newline — therefore keeps that
  * entry alive until the hard cutoff below, not for ever. Adapters should not
  * report `pending > 0` for work they can never actually consume.
+ *
+ * **Optional: `host.describePending(count, totalPending)`.** `--status` sums
+ * `probe().pending` across every tracked unit that has any, and an adapter can
+ * turn that into a human phrase — Claude Code's `pending` is bytes, so it
+ * reports "N transcript(s), M byte(s)"; Antigravity's is a 0/1 "did this
+ * database's mtime move" flag, so summing it would only restate `count`, and
+ * its phrasing says that honestly ("N conversation(s) with new generations")
+ * rather than dressing a flag up as a size. An adapter that omits this key
+ * gets the plain unit count.
  */
 
 import { upload } from "./upload.mjs";

@@ -268,6 +268,7 @@ Separate repo, separate PR, and the plugin is useless until it lands:
 | Portal rejects `antigravity` (401/403/429/5xx/400 whitelist) | spooled and retried per the existing classification |
 | Hook times out | agent loop is untouched: the handler returns `{}` in milliseconds and the work is detached |
 | Two sessions report at once | the existing lock serialises them; the loser's bytes are picked up by the next sweep |
+| Portal predates `antigravity` in `INGEST_SOURCES` (today's reality — Task 10 has not shipped) | `postBatch` reads the 400's `error.code`; `"invalid_source"` (with a prose fallback for an older portal build) is treated exactly like a revoked key — spooled, not dropped — so a plugin installed before the portal learns the new source loses nothing, it just queues until the portal side lands |
 
 ## Testing
 
@@ -284,12 +285,19 @@ The repo has no test runner today (`node --check` is the whole build). This adds
 
 ## Open items to settle during implementation
 
-1. **Install path.** Whether the plugin is installed by path, by
-   `agy plugin import from claude`, or through an `agy` marketplace file whose
-   format is undocumented in the binary. Verify with `agy plugin validate` before
-   writing install instructions.
-2. **`plugin.json` fields.** Only `name` is documented. Confirm `agy` tolerates
-   `description`/`version` rather than failing to parse.
+1. **Install path.** Still open — `agy plugin install` was deliberately never
+   run, across every task that touched this repo, because it writes into the
+   user's own `agy` customization root and `config.json`. `agy plugin
+   validate .` returns `[ok]`, so the manifest itself is accepted; whether
+   `install <target>` takes a bare path, needs `agy plugin import from
+   claude`, or wants a marketplace file in a format the binary does not
+   document, is unverified. The README documents `agy plugin validate` plus
+   installation by path as the expected route, explicitly flagged there as
+   the untested half.
+2. **`plugin.json` fields.** ~~Only `name` is documented.~~ **Resolved.**
+   `agy plugin validate .` returned `[ok]` with `description` present (Task
+   8) and, later, with `version` added alongside it (Task 9) — no reduction
+   to `{"name": …}` was ever needed.
 3. ~~**Step-index join for `ts`.**~~ **Resolved while writing the plan.**
    `gen_metadata.idx` *is* the transcript's `step_index` — both tables in the
    database are keyed on it, steps 40 and 84 of the sample conversation are

@@ -1,4 +1,5 @@
 {
   "name": "jyl-usage",
-  "description": "Reports Antigravity CLI token usage to the JianyueLab LLM portal. Counts only."
+  "description": "Reports Antigravity CLI token usage to the JianyueLab LLM portal. Counts only.",
+  "version": "0.3.0"
 }

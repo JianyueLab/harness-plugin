@@ -130,6 +130,11 @@ export const host = {
   // guard against here.
   skipReason: () => null,
 
+  // `pending` here is a 0/1 flag — "has this database's mtime moved since it
+  // was last read" — not a byte count, so summing it would just restate the
+  // count and dressing it up as a size would be dishonest. Say what it is.
+  describePending: (count) => `${count} conversation(s) with new generations`,
+
   statusNotes: () =>
     sqliteBackend()
       ? [`  sqlite backend:        ${sqliteBackend()}`]

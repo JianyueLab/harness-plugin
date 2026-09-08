@@ -87,6 +87,11 @@ test("probe reports pending work only when the database has moved", () => {
   expect(host.probe(path.join(conversations, "gone.db"), {})).toBeNull();
 });
 
+test("describePending phrases pending conversations honestly, not as bytes", () => {
+  expect(host.describePending(3, 3)).toBe("3 conversation(s) with new generations");
+  expect(host.describePending(0, 0)).toBe("0 conversation(s) with new generations");
+});
+
 test("a hook payload names its conversation database", () => {
   expect(host.unitsFromHook({ conversationId: "c1" })[0]).toMatch(/conversations\/c1\.db$/);
   expect(host.unitsFromHook({})).toEqual([]);

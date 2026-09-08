@@ -5,14 +5,23 @@ argument-hint: "[status | flush | backfill [days]]"
 
 Run the JianyueLab usage reporter's CLI and report what it says.
 
-The subcommand the user asked for is `$ARGUMENTS` (empty means `status`). Map it
-to exactly one `Bash` call — the script lives at `${CLAUDE_PLUGIN_ROOT}/scripts/run`:
+The subcommand the user asked for is `$ARGUMENTS` (empty means `status`). The
+script is `scripts/run` in this plugin's root. When `${CLAUDE_PLUGIN_ROOT}` is
+set, use it. **It will not be set if you are reading this as an Antigravity
+skill** — Antigravity converts this file into one, but sets no such variable —
+so in that case resolve the plugin root yourself from this file's own path
+(it lives at `<plugin root>/commands/jyl-usage.md`) and use
+`<plugin root>/scripts/run` instead. Under Antigravity, also append
+`--host antigravity` to every invocation below — the reporter defaults to
+Claude Code.
+
+Map the subcommand to exactly one `Bash` call:
 
 | Argument            | Command                                              | What it does |
 |---------------------|------------------------------------------------------|--------------|
-| _(empty)_ / `status`| `"${CLAUDE_PLUGIN_ROOT}/scripts/run" --status`        | Where it reports to, whether it is configured, how many events are waiting to retry, recent log lines. Reads only. |
-| `flush`             | `"${CLAUDE_PLUGIN_ROOT}/scripts/run" --flush`         | Retry events queued by earlier failed uploads. |
-| `backfill [days]`   | `"${CLAUDE_PLUGIN_ROOT}/scripts/run" --backfill [days]` | Scan **every** transcript touched in the last N days (default 30) and report anything not sent yet. Safe to repeat: the portal deduplicates on request id. |
+| _(empty)_ / `status`| `"<plugin root>/scripts/run" --status`        | Where it reports to, whether it is configured, how many events are waiting to retry, recent log lines. Reads only. |
+| `flush`             | `"<plugin root>/scripts/run" --flush`         | Retry events queued by earlier failed uploads. |
+| `backfill [days]`   | `"<plugin root>/scripts/run" --backfill [days]` | Scan **every** transcript touched in the last N days (default 30) and report anything not sent yet. Safe to repeat: the portal deduplicates on request id. |
 
 Then summarise the output in a sentence or two. If the status says it is not
 reporting, say why and point at the fix:

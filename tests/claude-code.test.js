@@ -68,6 +68,11 @@ test("probe reports the unread tail, and null once the file is gone", () => {
   expect(host.probe(file, { offset: 0 })).toBeNull();
 });
 
+test("describePending phrases the unread tail in bytes", () => {
+  expect(host.describePending(2, 4096)).toBe("2 transcript(s), 4096 byte(s)");
+  expect(host.describePending(0, 0)).toBe("0 transcript(s), 0 byte(s)");
+});
+
 test("skips a session already metered by the portal's proxy", () => {
   process.env.ANTHROPIC_BASE_URL = "https://llm.jianyuelab.net";
   try {

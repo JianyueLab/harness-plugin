@@ -189,6 +189,11 @@ export const host = {
     }
     return { mtimeMs: stat.mtimeMs, pending: Math.max(0, stat.size - (entry.offset ?? 0)) };
   },
+  // `pending` here is bytes, so the total across every tracked transcript is a
+  // real figure worth showing — the difference between a three-byte tail and a
+  // four-hundred-kilobyte one is exactly what tells someone whether the plugin
+  // is quietly stuck.
+  describePending: (count, totalPending) => `${count} transcript(s), ${totalPending} byte(s)`,
   read(unit, entry) {
     const { events, offset, gone } = readNewEvents(unit, entry.offset ?? 0);
     return gone ? { events: [], entry: null } : { events, entry: { offset } };

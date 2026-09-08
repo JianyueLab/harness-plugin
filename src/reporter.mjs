@@ -70,12 +70,21 @@ async function status(host, store, config) {
   const problem = configProblem(config);
 
   // What the next hook's sweep will pick up. Reported because a number here is
-  // the difference between "nothing to do" and usage that has not been sent.
+  // the difference between "nothing to do" and usage that has not been sent —
+  // and, via `describePending` when the adapter has one, the difference
+  // between a three-byte tail and a four-hundred-kilobyte one.
   let waiting = 0;
+  let totalPending = 0;
   for (const [unit, entry] of Object.entries(state.files)) {
     const probe = host.probe(unit, entry);
-    if (probe && probe.pending > 0) waiting += 1;
+    if (probe && probe.pending > 0) {
+      waiting += 1;
+      totalPending += probe.pending;
+    }
   }
+  const pendingLabel = host.describePending
+    ? host.describePending(waiting, totalPending)
+    : `${waiting} ${host.unitLabel}(s)`;
 
   // Antigravity reads SQLite through whichever backend exists; when none does,
   // that — not the config — is why nothing is being reported.
@@ -98,7 +107,7 @@ async function status(host, store, config) {
     `  status:      ${problem ? `NOT reporting — ${problem}` : "ready"}`,
     "",
     row(`${host.unitLabel}s tracked:`, Object.keys(state.files).length),
-    row("unread tails:", `${waiting} ${host.unitLabel}(s) — the next hook sweeps these`),
+    row("unread tails:", `${pendingLabel} — the next hook sweeps these`),
     row("events awaiting retry:", spool.length),
     row("dedup window:", `${store.readSeen().length} key(s)`),
   ];

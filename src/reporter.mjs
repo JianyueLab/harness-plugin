@@ -29,6 +29,7 @@
  */
 
 import fs from "node:fs";
+import { parseArgs } from "./core/args.mjs";
 import { configFiles, configProblem, loadConfig, redactKey } from "./core/config.mjs";
 import { report } from "./core/report.mjs";
 import { createStore } from "./core/store.mjs";
@@ -39,25 +40,6 @@ const HOSTS = { "claude-code": claudeCode };
 
 /** Units touched within this many days are in scope for `--backfill`. */
 const DEFAULT_BACKFILL_DAYS = 30;
-
-/**
- * Parse the arguments the launcher passes through.
- *
- * The command used to be "the first thing starting with `--`", which now would
- * read `--host` as the command. Hooks pass nothing at all, so `--hook` stays
- * the default.
- */
-function parseArgs(argv) {
-  const out = { command: "--hook", host: "claude-code", days: null };
-  for (let i = 0; i < argv.length; i++) {
-    const arg = argv[i];
-    if (arg === "--host") { out.host = argv[++i] ?? out.host; continue; }
-    if (arg === "--detach") continue;            // handled by scripts/run
-    if (arg.startsWith("--")) { out.command = arg; continue; }
-    if (/^\d+$/.test(arg)) out.days = Number(arg);
-  }
-  return out;
-}
 
 const hostFor = (name) => HOSTS[name] ?? HOSTS["claude-code"];
 

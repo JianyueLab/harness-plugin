@@ -13,13 +13,22 @@ afterEach(() => { globalThis.fetch = real; });
 const config = { baseUrl: "https://portal.example", apiKey: "jyl-k", enabled: true, reportGatewayTraffic: false };
 const ok = (body = { accepted: 0, duplicates: 0, rejected: [] }) => async () => new Response(JSON.stringify(body), { status: 200 });
 
-/** An adapter whose units are plain arrays of events, handed out once. */
-function fakeHost(units) {
+const DAY = 86_400_000;
+
+/**
+ * An adapter whose units are plain arrays of events, handed out once.
+ *
+ * `mtimeMs` defaults to *now* rather than the epoch: an epoch mtime is older
+ * than every retention cutoff, which made the sweep test below a test of
+ * retention instead of a test of the sweep. Retention gets its own tests, which
+ * pass the age they mean.
+ */
+function fakeHost(units, { mtimeMs = Date.now() } = {}) {
   return {
     id: "fake", source: "fake", client: "fake/1", title: "fake", unitLabel: "unit",
     stateDir: path.join(root, `s${Math.random()}`),
     unitsFromHook: () => [], recentUnits: () => Object.keys(units),
-    probe: (unit, entry) => (units[unit] ? { mtimeMs: 1, pending: entry.done ? 0 : 1 } : null),
+    probe: (unit, entry) => (units[unit] ? { mtimeMs, pending: entry.done ? 0 : 1 } : null),
     read: (unit, entry) => (entry.done ? { events: [], entry } : { events: units[unit], entry: { done: true } }),
     skipReason: () => null, statusNotes: () => [],
   };
@@ -96,4 +105,41 @@ test("forgets a unit the adapter says is gone", async () => {
   await report(host, store, config, [], { sweep: true });
 
   expect(store.loadState().files.vanished).toBeUndefined();
+});
+
+// --- retention: the soft cutoff, the hard cutoff, and what survives each ------
+
+test("forgets a finished unit once it is past the retention window", async () => {
+  globalThis.fetch = ok();
+  const host = fakeHost({ u1: [event("old-done")] }, { mtimeMs: Date.now() - 95 * DAY });
+  const store = createStore(host.stateDir);
+  store.saveState({ version: 2, files: { u1: { done: true } } });
+
+  await report(host, store, config, [], { sweep: true });
+
+  expect(store.loadState().files.u1).toBeUndefined();
+});
+
+test("keeps a stale unit that still has unread work, and sweeps it", async () => {
+  globalThis.fetch = ok({ accepted: 1, duplicates: 0, rejected: [] });
+  const host = fakeHost({ u1: [event("old-pending")] }, { mtimeMs: Date.now() - 95 * DAY });
+  const store = createStore(host.stateDir);
+  store.saveState({ version: 2, files: { u1: {} } });
+
+  const tally = await report(host, store, config, [], { sweep: true });
+
+  expect(tally.sent).toBe(1);
+  expect(store.loadState().files.u1.done).toBe(true);
+});
+
+test("forgets a unit past the portal's acceptance window even with unread work", async () => {
+  globalThis.fetch = ok();
+  const host = fakeHost({ u1: [event("ancient")] }, { mtimeMs: Date.now() - 120 * DAY });
+  const store = createStore(host.stateDir);
+  store.saveState({ version: 2, files: { u1: {} } });
+
+  const tally = await report(host, store, config, [], { sweep: true });
+
+  expect(tally.sent).toBe(0);
+  expect(store.loadState().files.u1).toBeUndefined();
 });

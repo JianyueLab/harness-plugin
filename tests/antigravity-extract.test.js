@@ -110,9 +110,12 @@ describe("eventFromBlob", () => {
   });
 
   test("skips a row with an unrecognised field number in the counts message", () => {
+    // Field 12: genuinely unused in real blobs, unlike field 7 (which is real
+    // but holds a string — `bot-<uuid>` — never a varint, so encoding it as
+    // one here would not be a shape `agy` could actually emit).
     const unknown = msg(
       bytes(1, msg(
-        bytes(4, msg(vint(1, 1318), vint(2, 3507), vint(3, 2729), vint(5, 82207), vint(7, 123), vint(9, 993), vint(10, 1736))),
+        bytes(4, msg(vint(1, 1318), vint(2, 3507), vint(3, 2729), vint(5, 82207), vint(12, 123), vint(9, 993), vint(10, 1736))),
         str(19, "gemini-3.8-flash"),
         bytes(20, msg(str(1, "request_id"), str(2, "traj-unk"))),
       )),
@@ -124,15 +127,14 @@ describe("eventFromBlob", () => {
     expect(eventFromBlob(blob())).toBeNull();
   });
 
-  test("does not skip a row carrying field 6 — a real agy 1.1.27 addition, constant across every sampled row", () => {
-    // Found on real conversation databases while running Task 11's end-to-end
-    // verification: agy 1.1.27 (the design doc's fixtures predate it, written
-    // against "agy 2.12.0") adds a seventh varint to the counts message,
-    // `1.4.6`, holding a constant `24` in every one of ~500 real rows across
-    // 8 conversations regardless of token counts — not a token count itself,
-    // just a field this plugin had never seen. Before this fix every row on
-    // that machine was skipped by the unknown-field guard: 0 events from 462
-    // real generations.
+  test("does not skip a row carrying field 6 at its known value, 24", () => {
+    // Field 6 was never agy drift — it is present on the very rows the design
+    // doc's field table was built from (f545305a idx 0 and idx 40), which
+    // just never enumerated it. The unknown-field guard was transcribed from
+    // that table rather than derived from a blob, so it rejected every row on
+    // first real use: 0 events from 462 real generations, until this fix.
+    // Real figure: `1.4.6 == 24` on all 487 count-bearing rows across the 7
+    // (of 9) local conversation databases that have any rows at all.
     const withField6 = msg(
       bytes(1, msg(
         bytes(4, msg(vint(1, 1318), vint(2, 3507), vint(3, 2729), vint(5, 82207), vint(6, 24), vint(9, 993), vint(10, 1736))),
@@ -151,5 +153,19 @@ describe("eventFromBlob", () => {
       cacheWrite1hTokens: 0,
       cacheReadTokens: 82207,
     });
+  });
+
+  test("skips a row where field 6 is present but not its pinned value, 24", () => {
+    // Field 6 is permitted only at the one value ever observed. If a future
+    // agy reuses this field number for a real count, this must fail rather
+    // than silently pass the tokens through unread.
+    const wrongSentinel = msg(
+      bytes(1, msg(
+        bytes(4, msg(vint(1, 1318), vint(2, 3507), vint(3, 2729), vint(5, 82207), vint(6, 25), vint(9, 993), vint(10, 1736))),
+        str(19, "gemini-3.8-flash"),
+        bytes(20, msg(str(1, "request_id"), str(2, "traj-f6-wrong"))),
+      )),
+    );
+    expect(eventFromBlob(wrongSentinel, { ts: TS })).toBeNull();
   });
 });

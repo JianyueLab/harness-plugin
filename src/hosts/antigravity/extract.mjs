@@ -22,13 +22,23 @@
  * 3. Neither guard catches a permutation among the six token-bearing field numbers.
  *
  * A failed check means the row is skipped — under-reporting, which `--status`
- * shows, instead of wrong numbers, which nobody would notice. Field 6 joined the
- * known set during Task 11's end-to-end run against agy 1.1.27 (newer than the
- * 2.12.0 the rest of this mapping was read from): it is present on ~500 real
- * rows across 8 conversations, always the constant `24` regardless of token
- * counts — evidently not a token count, so it is permitted but not read.
- * Without this, every row on that machine was skipped: 0 events from 462
- * generations in the one active conversation.
+ * shows, instead of wrong numbers, which nobody would notice.
+ *
+ * **Field 6 was never `agy` drift — it was in the design document's own
+ * evidence all along.** It is present on `f545305a…` idx 0 and idx 40, the
+ * exact two rows the design doc's field table quotes verbatim ("26404 on the
+ * first generation", "3507 … then 82207", `request_id …-40`). The unknown-field
+ * guard landed at `e7e0ff3` citing a real-data run made *before* the guard
+ * existed (`6b69c48`, 168/168) as its validation, so `KNOWN_USAGE_FIELDS` was
+ * transcribed from the design doc's table rather than derived from a blob —
+ * Task 11 was the guard's first real test, not a vendor change catching it.
+ * Commit `c126cdc` names the cause as agy 1.1.27 drift; that is wrong, left as
+ * history, corrected here and in the design doc. Real figures: field 6 is
+ * `24` on all 487 count-bearing rows across the 7 (of 9) local conversation
+ * databases that have any rows — constant regardless of token counts, so it
+ * is not itself a token count, but its value is pinned rather than merely
+ * permitted (below): a future `agy` reusing field 6 for a real count must
+ * fail the guard, not silently vanish into an unread field.
  */
 
 import { scan } from "../../lib/protobuf.mjs";
@@ -39,6 +49,14 @@ const PAIRS_PATH = "1.20";
 
 /** Every varint field number we have ever seen in a counts message. */
 const KNOWN_USAGE_FIELDS = new Set([1, 2, 3, 5, 6, 9, 10]);
+/**
+ * Field 6's only ever-observed value. Permitting the field's presence
+ * unconditionally would let a future `agy` repurpose it for a real count and
+ * have those tokens silently dropped — exactly the failure this whole guard
+ * exists to prevent. Pinning it converts "always 24 in practice" from an
+ * assertion in a comment into something the code actually checks.
+ */
+const FIELD_6_SENTINEL = 24;
 
 const int = (v) => (typeof v === "number" && Number.isFinite(v) && v > 0 ? Math.round(v) : 0);
 
@@ -69,6 +87,10 @@ function usageFrom(sc) {
     if (presentFields.some((f) => !KNOWN_USAGE_FIELDS.has(f))) continue;
 
     const at = (field) => int(sc.varints.get(`${base}.${field}`)?.[0]);
+    // Field 6 is permitted only at its one ever-observed value. A future
+    // `agy` reusing this field number for a real count must fail here, not
+    // pass through unread — see the header.
+    if (presentFields.includes(6) && at(6) !== FIELD_6_SENTINEL) continue;
     const total = at(3);
     const thinking = at(9);
     const text = at(10);

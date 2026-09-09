@@ -100,6 +100,10 @@ and these varints, observed consistent across three conversations and many rows:
 | `1.4.9` | thinking output | |
 | `1.4.10` | text output | |
 | `1.4.3` | output total | equals `1.4.9 + 1.4.10` in every row sampled |
+| `1.4.6` | **not a token count** — an unidentified constant | `24` on all 487 count-bearing rows across every conversation sampled (Task 11), regardless of token counts. Present on `f545305a` idx 0 and idx 40 above — it was in this table's own source rows from the start, just never enumerated (see the guard discussion below) |
+| `1.4.7` | not extracted — an id string | `bot-<uuid>`, not a varint |
+| `1.4.8` | not extracted — a submessage | `{sessionID: …}` |
+| `1.4.11` | not extracted — an opaque id | |
 
 The same message is mirrored at `1.17.2.*`. A sibling message at `1.9.10` holds
 `{1: context tokens used, 4: 256000}` — the context-window gauge `/usage`
@@ -186,16 +190,30 @@ field numbers alone. A candidate usage message is checked by two guards:
 1. The output total must equal thinking plus text (`f3 == f9 + f10`) — this catches
    drift in the output triad if `agy` renumbers those three fields.
 2. Every varint field number in the counts message must be from the known set
-   {1, 2, 3, 5, 6, 9, 10} — this catches renumbering that introduces new fields.
-   Field 6 joined the set during Task 11: agy 1.1.27 (the version actually
-   installed, newer than the 2.12.0 this mapping was read from) adds it to
-   every row, always the constant `24` regardless of token counts — permitted
-   because it is evidently not a token count, but not read into any output
-   field, since what it is remains unknown.
+   {1, 2, 3, 5, 6, 9, 10}, and field 6 additionally must equal `24` when
+   present — this catches both renumbering that introduces new fields and a
+   future reuse of field 6 for a real count.
 3. Neither guard catches a permutation among the six token-bearing field numbers.
 A row failing either guard is skipped and logged, never guessed at. The
 consequence of `agy` changing its protobuf is under-reporting, which is visible
 in `--status`, rather than fabricated numbers in the portal.
+
+**Field 6 was never `agy` drift, and the corrected story matters more than the
+field itself.** It joined the known set during Task 11 after real extraction
+against a live conversation yielded zero events — but field 6 was not new: it
+is present on `f545305a` idx 0 and idx 40, the exact two rows this document's
+own field table above was built from (`26404 on the first generation`, then
+`3507 … 82207`, `request_id …-40`). The table simply never enumerated it. The
+real cause: the unknown-field guard landed at `e7e0ff3`, citing the real-data
+run from `6b69c48` — made *before the guard existed* — as its validation, so
+`KNOWN_USAGE_FIELDS` was transcribed from this document's table rather than
+derived from a blob, and was never once run against real data before being
+committed. Task 11 was that guard's first real test, and it correctly caught
+its own incomplete field list — not a vendor change. Commit `c126cdc`
+("recognise field 6 ... real agy 1.1.27 drift") names the wrong cause; it
+stands as history, corrected here and in `extract.mjs`'s header comment. Real
+figures: `1.4.6 == 24` on all 487 count-bearing rows across the 7 (of 9) local
+conversation databases that have any rows.
 
 SQLite access, in order, first that works: `bun:sqlite`, `node:sqlite`, the
 system `sqlite3` binary, otherwise skip and log. Databases are opened read-only;
@@ -311,19 +329,24 @@ The repo has no test runner today (`node --check` is the whole build). This adds
    join is exact. The database-mtime fallback stays for conversations whose
    transcript is missing or half-written.
 4. **Field-number confirmation.** ~~Step 5 extracted 168 generations~~ **Updated
-   in Task 11, against agy 1.1.27 (not the 2.12.0 used to build the mapping):**
-   before Task 11's fix, extraction against the live conversation's 462 real
-   rows (grown from Task 3's 168) yielded **zero** events — the unknown-field
-   guard (item 2 above) was correctly rejecting every row over a newly-added
-   constant field, `1.4.6 = 24`. With field 6 added to the known set, 461/462
-   rows yield valid events (the one exception has no model string at all — a
-   different, pre-existing skip path). The output-triad invariant (`f3 == f9 +
-   f10`) held on all 461. A cross-check against `agy`'s own `/usage` panel to
-   validate these counts against ground truth was **not done** — the CLI's
-   stored OAuth credentials had expired and refreshing them needed a fresh
-   interactive Google consent flow, which was correctly not completed without
-   asking the user first (see the Task 11 report); no interactive session, and
-   so no `/usage` panel, was reachable in this run.
+   in Task 11:** extraction against real conversation databases initially
+   yielded **zero** events — the unknown-field guard (item 2 above) was
+   correctly rejecting every row over field 6. **Not `agy` drift** (corrected
+   from an earlier version of this item, and from commit `c126cdc`'s message):
+   field 6 was present on the very rows this document's own field table was
+   built from; the guard's known-field set had been transcribed from that
+   table rather than derived from a blob, and Task 11 was its first real test.
+   See the guard discussion above for the full correction. With field 6 added
+   to the known set (and pinned to its one observed value, `24`), 487
+   count-bearing rows across the 7 (of 9) local conversation databases that
+   have any rows all yield valid events, invariant holding on every one — a
+   substantially broader real-data check than Task 3's original 168 from one
+   conversation. A cross-check against `agy`'s own `/usage` panel to validate
+   these counts against ground truth was **not done** — the CLI's stored OAuth
+   credentials had expired and refreshing them needed a fresh interactive
+   Google consent flow, which was correctly not completed without asking the
+   user first (see the Task 11 report); no interactive session, and so no
+   `/usage` panel, was reachable in this run.
 5. **Claude models under Antigravity.** The blob carries `used_claude` and
    `used_non_gemini_model` flags, so `agy` can spend non-Gemini models. The model
    string handles it; no special case is expected, but it is untested.

@@ -18,11 +18,17 @@
  * 1. The output total must equal thinking plus text (fields 3, 9, 10) — this
  *    catches drift in the output triad.
  * 2. Every varint field number in the counts message must be from the known set
- *    {1, 2, 3, 5, 9, 10} — this catches renumbering that introduces new fields.
- * 3. Neither guard catches a permutation among the six known field numbers.
+ *    {1, 2, 3, 5, 6, 9, 10} — this catches renumbering that introduces new fields.
+ * 3. Neither guard catches a permutation among the six token-bearing field numbers.
  *
  * A failed check means the row is skipped — under-reporting, which `--status`
- * shows, instead of wrong numbers, which nobody would notice.
+ * shows, instead of wrong numbers, which nobody would notice. Field 6 joined the
+ * known set during Task 11's end-to-end run against agy 1.1.27 (newer than the
+ * 2.12.0 the rest of this mapping was read from): it is present on ~500 real
+ * rows across 8 conversations, always the constant `24` regardless of token
+ * counts — evidently not a token count, so it is permitted but not read.
+ * Without this, every row on that machine was skipped: 0 events from 462
+ * generations in the one active conversation.
  */
 
 import { scan } from "../../lib/protobuf.mjs";
@@ -32,7 +38,7 @@ const MODEL_PATH = "1.19";
 const PAIRS_PATH = "1.20";
 
 /** Every varint field number we have ever seen in a counts message. */
-const KNOWN_USAGE_FIELDS = new Set([1, 2, 3, 5, 9, 10]);
+const KNOWN_USAGE_FIELDS = new Set([1, 2, 3, 5, 6, 9, 10]);
 
 const int = (v) => (typeof v === "number" && Number.isFinite(v) && v > 0 ? Math.round(v) : 0);
 

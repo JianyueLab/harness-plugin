@@ -32,7 +32,9 @@ const conversationId = (dbFile) => path.basename(dbFile, ".db");
  * `gen_metadata.idx` is the same sequence as the transcript's `step_index` —
  * both tables in the database are keyed on it, and a generation at idx 40 is
  * step 40 in `transcript.jsonl`, whose `created_at` is the only real timestamp
- * on offer. Confirmed against agy 2.12.0.
+ * on offer. Confirmed against agy 1.1.27 (`agy --version`) — 2.12.0, cited by
+ * an earlier pass of this comment, is the Antigravity.app desktop bundle's
+ * version, not the CLI's.
  */
 export function timestampsFor(dbFile) {
   const file = path.join(roots.brain, conversationId(dbFile), ".system_generated", "logs", "transcript.jsonl");
@@ -101,7 +103,19 @@ export const host = {
     return { mtimeMs: stat.mtimeMs, pending: stat.mtimeMs > (entry.mtimeMs ?? 0) ? 1 : 0 };
   },
 
-  read(unit, entry) {
+  /**
+   * `log`, when given, is `store.log` — called at most once per read, and only
+   * with numbers. This is the whole visibility story for an inferred field
+   * mapping: a row that fails a guard does not just vanish into `extract.mjs`'s
+   * `null`, it is counted here (where the row count is known) and surfaced
+   * both in the log and, cumulatively via `entry.skipped`, in `--status` — see
+   * `reporter.mjs`'s `status()`. Logging from inside `read()` rather than from
+   * `report()` means the line is written during the walk itself, before
+   * `report()` ever decides whether there was anything left to upload — so a
+   * conversation that skips every row is not indistinguishable from an idle
+   * machine just because zero events made it out the other end.
+   */
+  read(unit, entry, log) {
     let stat;
     try {
       stat = fs.statSync(unit);
@@ -111,18 +125,32 @@ export const host = {
     const after = Number.isFinite(entry.idx) ? entry.idx : -1;
     const rows = readGenMetadata(unit, after);
     if (rows === null) return { events: [], entry }; // no sqlite backend; try again later
-    if (rows.length === 0) return { events: [], entry: { idx: after, mtimeMs: stat.mtimeMs } };
+    if (rows.length === 0) {
+      return { events: [], entry: { idx: after, mtimeMs: stat.mtimeMs, skipped: entry.skipped ?? 0 } };
+    }
 
     const stamps = timestampsFor(unit);
     const fallback = new Date(stat.mtimeMs).toISOString();
     const events = [];
     let highest = after;
+    let skippedThisRead = 0;
     for (const row of rows) {
       highest = Math.max(highest, row.idx);
       const event = eventFromBlob(row.data, { ts: stamps.get(row.idx) ?? fallback });
       if (event) events.push(event);
+      else skippedThisRead++;
     }
-    return { events, entry: { idx: highest, mtimeMs: stat.mtimeMs } };
+    // One line per read, not per row: a conversation with hundreds of
+    // unrecognised rows must not write hundreds of log lines. Counts only —
+    // no conversation id, no path, no blob content.
+    if (skippedThisRead > 0 && typeof log === "function") {
+      log(
+        `agy: skipped ${skippedThisRead} of ${rows.length} generation(s) in one conversation; ` +
+          "the field mapping may have drifted",
+      );
+    }
+    const skipped = (entry.skipped ?? 0) + skippedThisRead;
+    return { events, entry: { idx: highest, mtimeMs: stat.mtimeMs, skipped } };
   },
 
   // `agy` cannot be pointed at the portal — it speaks Google's Code Assist

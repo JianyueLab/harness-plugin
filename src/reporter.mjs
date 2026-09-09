@@ -73,27 +73,26 @@ async function status(host, store, config) {
   // the difference between "nothing to do" and usage that has not been sent —
   // and, via `describePending` when the adapter has one, the difference
   // between a three-byte tail and a four-hundred-kilobyte one.
+  //
+  // `entry.skipped`, when an adapter sets it, is a cumulative count of rows
+  // that produced no event — Antigravity's guard failures are the one case
+  // today. Once a hook has run, `probe`'s mtime flag reads as "nothing new"
+  // again even if every row it just read was unreadable, so this is what
+  // keeps that outcome from looking identical to an idle machine.
   let waiting = 0;
   let totalPending = 0;
+  let totalSkipped = 0;
   for (const [unit, entry] of Object.entries(state.files)) {
     const probe = host.probe(unit, entry);
     if (probe && probe.pending > 0) {
       waiting += 1;
       totalPending += probe.pending;
     }
+    totalSkipped += entry.skipped ?? 0;
   }
   const pendingLabel = host.describePending
     ? host.describePending(waiting, totalPending)
     : `${waiting} ${host.unitLabel}(s)`;
-
-  // Antigravity reads SQLite through whichever backend exists; when none does,
-  // that — not the config — is why nothing is being reported.
-  let backendLine = null;
-  if (host.id === "antigravity") {
-    const { sqliteBackend } = await import("./lib/sqlite.mjs");
-    const backend = sqliteBackend();
-    backendLine = `  sqlite:      ${backend ?? "none — needs bun, node:sqlite, or sqlite3 on PATH"}`;
-  }
 
   const row = (label, value) => `  ${label.padEnd(22)} ${value}`;
   const lines = [
@@ -103,7 +102,6 @@ async function status(host, store, config) {
     `  api key:     ${redactKey(config.apiKey)}`,
     `  enabled:     ${config.enabled}`,
     `  config file: ${config.source ?? `${store.configFile} (absent)`}`,
-    ...(backendLine ? [backendLine] : []),
     `  status:      ${problem ? `NOT reporting — ${problem}` : "ready"}`,
     "",
     row(`${host.unitLabel}s tracked:`, Object.keys(state.files).length),
@@ -111,6 +109,9 @@ async function status(host, store, config) {
     row("events awaiting retry:", spool.length),
     row("dedup window:", `${store.readSeen().length} key(s)`),
   ];
+  if (totalSkipped > 0) {
+    lines.push(row("skipped rows:", `${totalSkipped} — the field mapping may have drifted; see the log`));
+  }
   lines.push(...host.statusNotes(config));
   if (fs.existsSync(store.logFile)) {
     const tail = fs.readFileSync(store.logFile, "utf8").trimEnd().split("\n").slice(-8);

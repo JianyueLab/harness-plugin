@@ -27,9 +27,17 @@ verified against them, and this machine has no data from either.
 
 ## What `agy` actually gives us
 
-Established by inspecting `agy` 2.12.0 (`/opt/homebrew/bin/agy`, a Go binary
+Established by inspecting `agy` 1.1.27 (`/opt/homebrew/bin/agy`, a Go binary
 whose embedded documentation is readable with `strings`) and the live state under
 `~/.gemini/antigravity-cli/`.
+
+**On the version number: `agy --version` reports `1.1.27`. An earlier draft of
+this document, and of `extract.mjs`'s and `antigravity.mjs`'s header comments,
+said `2.12.0` instead — that is the *Antigravity.app desktop bundle's* version
+(read early on by the controller, before the CLI itself was inspected, and
+propagated into this spec by mistake), not the CLI's. `1.1.27` is the correct
+pin on where this undocumented mapping came from; do not "correct" it back to
+`2.12.0`.**
 
 ### Plugins
 
@@ -263,9 +271,17 @@ sibling at `skills/jyl-usage/SKILL.md` with the same three verbs: status, flush,
 backfill.
 
 That directory is also visible to Claude Code, which loads a plugin's `skills/`
-too, so the repo would expose both a `/jyl-usage` command and a `jyl-usage` skill
-to the same host. Confirm during implementation whether Claude Code minds; if it
-does, the skill directory takes a distinct name and `agy` gets the longer verb.
+too, so the repo exposes both a `/jyl-usage` command and a `jyl-usage` skill to
+the same host. **Resolved during implementation, and not the way this section
+originally proposed:** Claude Code does not mind the collision — nothing
+breaks, since all three verbs are safe against an empty store either way — but
+a `jyl-usage` skill written only for `agy` gives a wrong answer (Antigravity's
+numbers) when Claude Code happens to reach for it instead of `/jyl-usage`.
+Renaming the skill directory was not needed; `skills/jyl-usage/SKILL.md`
+itself became host-aware instead, the same way `commands/jyl-usage.md` already
+had to be for the reverse case (that file gets converted into a skill of its
+own under `agy`) — it checks `${CLAUDE_PLUGIN_ROOT}` to tell which host asked
+and picks the right invocation rather than hardcoding one flag.
 
 ## The `llm-web` change
 
@@ -308,15 +324,20 @@ The repo has no test runner today (`node --check` is the whole build). This adds
 
 ## Open items to settle during implementation
 
-1. **Install path.** Still open — `agy plugin install` was deliberately never
-   run, across every task that touched this repo, because it writes into the
-   user's own `agy` customization root and `config.json`. `agy plugin
-   validate .` returns `[ok]`, so the manifest itself is accepted; whether
-   `install <target>` takes a bare path, needs `agy plugin import from
-   claude`, or wants a marketplace file in a format the binary does not
-   document, is unverified. The README documents `agy plugin validate` plus
-   installation by path as the expected route, explicitly flagged there as
-   the untested half.
+1. ~~**Install path.** Still open — `agy plugin install` was deliberately
+   never run, across every task that touched this repo...~~ **Closed in Task
+   11.** `agy plugin install "$PWD"` — a bare absolute path — worked first
+   try; no `agy plugin import from claude` and no marketplace file were
+   needed. One thing this item did not anticipate: the install takes a full
+   local snapshot copy of the target directory, `.git` included, rather than
+   linking to it or fetching from the repo's own `origin` remote (proof: the
+   installed copy sat on this machine's unpushed feature-branch tip, and its
+   `.git/config` still names `origin` as the original checkout's remote, not
+   the local path it was installed from). Practical consequence: a later
+   local change, including a commit, is invisible to `agy` until `agy plugin
+   install` is re-run; re-running it in place is safe and just refreshes the
+   snapshot (`import_manifest.json`'s `importedAt` does not even change on a
+   repeat install).
 2. **`plugin.json` fields.** ~~Only `name` is documented.~~ **Resolved.**
    `agy plugin validate .` returned `[ok]` with `description` present (Task
    8) and, later, with `version` added alongside it (Task 9) — no reduction

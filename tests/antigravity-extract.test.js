@@ -4,7 +4,7 @@ import { bytes, msg, str, vint } from "./helpers/pb.js";
 
 const TS = "2026-09-08T03:58:59Z";
 
-/** One `gen_metadata.data` blob, shaped like the ones agy 2.12.0 writes. */
+/** One `gen_metadata.data` blob, shaped like the ones agy 1.1.27 writes. */
 function blob({ input = 3507, cached = 82207, think = 993, text = 1736, model = "gemini-3.8-flash", requestId = "traj-40" } = {}) {
   const usage = msg(
     vint(1, 1318), // model enum, not a token count

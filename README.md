@@ -53,17 +53,27 @@ $ agy plugin validate .
           ✔ commands    : 1 processed (converted to skills)
           - mcpServers  : skipped (not found)
           ✔ hooks       : 1 processed
+
+$ agy plugin install "$PWD"
+  [ok]    jyl-usage
+          ✔ skills      : 1 processed
+          - agents      : skipped (not found)
+          ✔ commands    : 1 processed (converted to skills)
+          - mcpServers  : skipped (not found)
+          ✔ hooks       : 1 processed
 ```
 
-What is **not** verified: `agy plugin install <path-to-this-checkout>` is the
-documented, expected route to actually install it — `agy plugin --help` lists
-`install <target>` — but nobody has run it against this plugin. It was
-deliberately withheld, both while building this and while writing this
-README: it writes into your own `agy` customization root and its own
-`config.json`, which is not something to run on a reader's behalf sight
-unseen, and this plugin's own reports would currently just queue anyway (see
-*Things worth knowing* below). Run `agy plugin install` yourself; if what it
-does differs from what is written here, this section needs correcting.
+A bare absolute path is the route that works — `agy plugin --help` lists
+`install <target>`, and no `agy plugin import from claude` and no
+marketplace-file dance was needed.
+
+**The install copies a full local snapshot of the checkout, `.git` included —
+it does not link to it and does not fetch from `origin`.** `agy plugin list`
+shows the installed copy by name; it lands wherever `agy`'s own customization
+root keeps plugins (`~/.gemini/config/plugins/<name>` at the time this was
+verified). Because it is a snapshot, a later local change — including a
+commit — is invisible to `agy` until `agy plugin install "$PWD"` is run again;
+re-running it in place is safe and just refreshes the copy.
 
 Requires `bun` or `node` on `PATH` for the launcher itself (as above), plus —
 specifically for reading `agy`'s conversation databases — one of `bun`'s

@@ -2,8 +2,11 @@
  * One `gen_metadata` blob → one reportable event.
  *
  * `agy` ships no schema for this, so the paths below were established by
- * reading real blobs from agy 2.12.0 and are documented in
- * `docs/superpowers/specs/2026-09-08-agy-usage-reporter-design.md`:
+ * reading real blobs from agy 1.1.27 (`agy --version`) and are documented in
+ * `docs/superpowers/specs/2026-09-08-agy-usage-reporter-design.md`. (An
+ * earlier pass of this comment and the design doc said 2.12.0 — that is the
+ * Antigravity.app *desktop bundle's* version, not the CLI's; see the design
+ * doc for how it got there.)
  *
  *   1.19   the model id, as a plain string ("gemini-3.8-flash")
  *   1.20   a repeated {1: key, 2: value} table holding `request_id` among others
@@ -21,8 +24,12 @@
  *    {1, 2, 3, 5, 6, 9, 10} — this catches renumbering that introduces new fields.
  * 3. Neither guard catches a permutation among the six token-bearing field numbers.
  *
- * A failed check means the row is skipped — under-reporting, which `--status`
- * shows, instead of wrong numbers, which nobody would notice.
+ * A failed check means the row is skipped — under-reporting, instead of wrong
+ * numbers, which nobody would notice. This function stays silent about it by
+ * design (it is a pure function, no logger, no I/O); it is the caller,
+ * `antigravity.mjs`'s `read()`, that counts a `null` back from here and makes
+ * it visible — one log line per read and a cumulative count in `--status`, so
+ * the skip is never just this file's own secret.
  *
  * **Field 6 was never `agy` drift — it was in the design document's own
  * evidence all along.** It is present on `f545305a…` idx 0 and idx 40, the

@@ -120,9 +120,15 @@ function sweepTargets(host, store, state, explicit, sweep) {
  *
  * The entry shape is the adapter's business entirely: `null` back from `read`
  * means the unit is gone and the core forgets it.
+ *
+ * `store.log` is handed to `read` as a third argument so an adapter that finds
+ * something worth a human's attention — Antigravity's guard-failure count is
+ * the one that exists today — can write it at the point it is known, rather
+ * than this generic pass having to know host-specific things to say on a
+ * host's behalf. A host that has nothing to say ignores the extra argument.
  */
-function collect(host, state, unit) {
-  const { events, entry } = host.read(unit, state.files[unit] ?? {});
+function collect(host, store, state, unit) {
+  const { events, entry } = host.read(unit, state.files[unit] ?? {}, store.log);
   if (entry === null) delete state.files[unit];
   else state.files[unit] = entry;
   return events;
@@ -155,7 +161,7 @@ export async function report(host, store, config, units, { sweep = false } = {})
   const targets = sweepTargets(host, store, state, units, sweep);
 
   const found = [];
-  for (const unit of targets) found.push(...collect(host, state, unit));
+  for (const unit of targets) found.push(...collect(host, store, state, unit));
 
   // The dedup window is only read when there is something to check against it,
   // which leaves a hook with no new turns at a probe per tracked unit and

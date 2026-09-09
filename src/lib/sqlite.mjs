@@ -113,6 +113,12 @@ export function readViaCli(dbFile, afterIdx, { readonly = true } = {}) {
     const out = execFileSync("sqlite3", args, {
       encoding: "utf8",
       maxBuffer: 64 * 1024 * 1024,
+      // A corrupt or missing-table database is an expected, caught outcome
+      // here (see below), not a surprise worth printing — silence stderr so
+      // it does not leak past this function onto the hook's or `bun test`'s
+      // own stderr. The exit code (and thus the throw the catch below relies
+      // on) is unaffected by which streams are inherited.
+      stdio: ["ignore", "pipe", "ignore"],
     });
     const rows = [];
     for (const line of out.split("\n")) {

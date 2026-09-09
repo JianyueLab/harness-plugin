@@ -26,12 +26,26 @@ function blob(idx) {
   )));
 }
 
-function conversation(id, indices, steps = []) {
+/**
+ * A row the field mapping cannot read: field 12 is outside the known set, so
+ * the unknown-field guard rejects it — exactly the drift this reporter exists
+ * to catch, not to hide.
+ */
+function badBlob(idx) {
+  const usage = msg(vint(1, 1318), vint(2, 100), vint(3, 30), vint(5, 200), vint(9, 10), vint(10, 20), vint(12, 999));
+  return msg(bytes(1, msg(
+    bytes(4, usage),
+    str(19, "gemini-3.8-flash"),
+    bytes(20, msg(str(1, "request_id"), str(2, `conv-${idx}`))),
+  )));
+}
+
+function conversation(id, indices, steps = [], blobFn = blob) {
   const file = path.join(conversations, `${id}.db`);
   const db = new Database(file, { create: true });
   db.run("CREATE TABLE `gen_metadata` (`idx` integer, `data` blob, `size` integer NOT NULL DEFAULT 0, PRIMARY KEY (`idx`))");
   const insert = db.prepare("INSERT INTO gen_metadata (idx, data, size) VALUES (?, ?, ?)");
-  for (const idx of indices) { const b = blob(idx); insert.run(idx, b, b.length); }
+  for (const idx of indices) { const b = blobFn(idx); insert.run(idx, b, b.length); }
   db.close();
 
   const logs = path.join(brain, id, ".system_generated", "logs");
@@ -100,4 +114,56 @@ test("a hook payload names its conversation database", () => {
 test("timestampsFor indexes the transcript by step", () => {
   conversation("c5", [], [{ step_index: 2, created_at: "2026-09-08T09:00:00Z" }]);
   expect(timestampsFor(path.join(conversations, "c5.db")).get(2)).toBe("2026-09-08T09:00:00Z");
+});
+
+// --- guard failures must be counted and logged, never silent ---------------
+//
+// The whole safety argument for an inferred field mapping is that a future
+// `agy` renumbering its fields produces *visible* under-reporting, not
+// invisible wrong numbers. That visibility has to survive contact with a real
+// conversation whose rows all fail a guard, not just exist in a comment.
+
+test("counts and logs rows the field mapping cannot read, without leaking anything but numbers", () => {
+  const file = conversation("c6", [1, 2, 3], [], badBlob);
+  const logged = [];
+
+  const { events, entry } = host.read(file, {}, (line) => logged.push(line));
+
+  expect(events).toHaveLength(0);
+  expect(entry.skipped).toBe(3);
+  expect(logged).toEqual([
+    "agy: skipped 3 of 3 generation(s) in one conversation; the field mapping may have drifted",
+  ]);
+  // Only counts leave the machine: no conversation id, no path, no blob content.
+  expect(logged[0]).not.toContain("c6");
+  expect(logged[0]).not.toContain(file);
+});
+
+test("logs nothing, and counts nothing skipped, when every row extracts cleanly", () => {
+  const file = conversation("c7", [1, 2], [
+    { step_index: 1, created_at: "2026-09-08T03:00:00Z" },
+    { step_index: 2, created_at: "2026-09-08T03:01:00Z" },
+  ]);
+  const logged = [];
+
+  const { events, entry } = host.read(file, {}, (line) => logged.push(line));
+
+  expect(events).toHaveLength(2);
+  expect(entry.skipped).toBe(0);
+  expect(logged).toHaveLength(0);
+});
+
+test("the skip count is cumulative across reads, so a slow drip of bad rows still adds up", () => {
+  const file = conversation("c8", [1], [], badBlob);
+  const first = host.read(file, {}, () => {});
+  expect(first.entry.skipped).toBe(1);
+
+  // A second bad row lands later, at idx 2.
+  const db = new Database(file);
+  const b = badBlob(2);
+  db.prepare("INSERT INTO gen_metadata (idx, data, size) VALUES (?, ?, ?)").run(2, b, b.length);
+  db.close();
+
+  const second = host.read(file, first.entry, () => {});
+  expect(second.entry.skipped).toBe(2);
 });

@@ -121,6 +121,20 @@ test("throttle judges each beat by its own time, not the batch's nowMs", () => {
   expect(throttle(beats, state, apartMs)).toHaveLength(2);
 });
 
+test("two app heartbeats close together both survive; the 120s rule is file-only", () => {
+  const state = {};
+  // Two runs finishing under two minutes apart is the ordinary case, not an
+  // edge case. Each app beat carries that run's own token counts, so the
+  // second one must not be dropped just because it shares the app's static
+  // entity ("harness") and lands inside what would be the file-throttle
+  // window -- the 120s rule does not apply to `app` beats at all.
+  const beats = [
+    { entity: "harness", type: "app", time: 0, is_write: false },
+    { entity: "harness", type: "app", time: 60, is_write: false }, // 60s later
+  ];
+  expect(throttle(beats, state, 60_000)).toHaveLength(2);
+});
+
 test("a beat with no time falls back to the batch's nowMs", () => {
   const state = {};
   const beats = [{ entity: "/a.go", type: "file", time: undefined, is_write: false }];

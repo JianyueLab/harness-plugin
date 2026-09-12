@@ -90,12 +90,24 @@ export function heartbeatsFrom(payload, { project, branch, hideFileNames } = {})
  * fresh beats against a stale clock. `nowMs` keeps exactly one job: the
  * 24-hour prune below, which is about how stale the *state file* is, not any
  * one beat.
+ *
+ * The rule applies to `file` beats only. The `app` beat is a once-per-run
+ * bookkeeping record, not a repeated touch of anything, and each one carries
+ * that run's own token counts: two short runs finishing within 120s of each
+ * other (the ordinary case, not an edge case) must not have the second run's
+ * counts silently dropped because the first run's app beat is still in the
+ * window.
  */
 export function throttle(beats, state, nowMs) {
   const seen = (state.wakatimeSeen ??= {});
   const out = [];
 
   for (const beat of beats) {
+    if (beat.type !== "file") {
+      out.push(beat);
+      continue;
+    }
+
     const at = Number.isFinite(beat.time) ? beat.time * 1000 : nowMs;
     const last = seen[beat.entity];
     if (!beat.is_write && typeof last === "number" && at - last < THROTTLE_MS) continue;

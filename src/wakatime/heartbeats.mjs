@@ -35,8 +35,11 @@ export function heartbeatsFrom(payload, { project, branch, hideFileNames } = {})
 
   for (const call of Array.isArray(payload.tools) ? payload.tools : []) {
     // No path means no entity. bash, glob, grep and every MCP tool land here;
-    // inventing an entity for them would be a lie.
-    if (typeof call.path !== "string" || !call.path) continue;
+    // inventing an entity for them would be a lie. `call` itself can be
+    // null/undefined too — `"tools": [null, {...}]` is valid JSON — so guard
+    // that before touching `.path`, or a malformed batch throws and the hook
+    // loses every heartbeat in the run, not just the bad entry.
+    if (!call || typeof call.path !== "string" || !call.path) continue;
 
     const beat = {
       entity: hideFileNames ? obfuscate(call.path) : call.path,
@@ -78,19 +81,30 @@ export function heartbeatsFrom(payload, { project, branch, hideFileNames } = {})
  *
  * The last-sent time per entity lives in the shared state file. It is not in
  * `store`'s `seen` file — that is a set of keys and cannot carry a timestamp.
+ *
+ * The window is judged per beat, from that beat's own `time` (epoch seconds,
+ * straight from harness's payload) — not from `nowMs`. A single run can span
+ * several minutes, so every beat in one batch sharing one clock reading would
+ * collapse repeat edits of the same file into one heartbeat regardless of how
+ * far apart they actually happened, and would judge a late-processed batch's
+ * fresh beats against a stale clock. `nowMs` keeps exactly one job: the
+ * 24-hour prune below, which is about how stale the *state file* is, not any
+ * one beat.
  */
 export function throttle(beats, state, nowMs) {
   const seen = (state.wakatimeSeen ??= {});
   const out = [];
 
   for (const beat of beats) {
+    const at = Number.isFinite(beat.time) ? beat.time * 1000 : nowMs;
     const last = seen[beat.entity];
-    if (!beat.is_write && typeof last === "number" && nowMs - last < THROTTLE_MS) continue;
-    seen[beat.entity] = nowMs;
+    if (!beat.is_write && typeof last === "number" && at - last < THROTTLE_MS) continue;
+    seen[beat.entity] = at;
     out.push(beat);
   }
 
-  // Prune on write so the state file cannot grow without bound.
+  // Prune on every call (not just writes) so the state file cannot grow
+  // without bound.
   for (const [entity, at] of Object.entries(seen)) {
     if (nowMs - at > SEEN_TTL_MS) delete seen[entity];
   }

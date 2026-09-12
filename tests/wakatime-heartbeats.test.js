@@ -77,24 +77,67 @@ test("an unknown extension omits language rather than guessing", () => {
   expect("language" in file).toBe(false);
 });
 
+test("a null element in tools does not throw and does not block real entries", () => {
+  // "tools": [null, {...}] is valid JSON. A run that hits this must not lose
+  // every heartbeat in the batch just because one entry was malformed.
+  const withNull = {
+    ...payload,
+    tools: [null, { name: "read_file", path: "/abs/agent/agent.go", at: 1, elapsed_ms: 1, is_error: false }],
+  };
+  const beats = heartbeatsFrom(withNull, opts);
+  const files = beats.filter((b) => b.type === "file");
+  expect(files).toHaveLength(1);
+  expect(files[0].entity).toBe("/abs/agent/agent.go");
+});
+
 test("the same file inside 120s is sent once; a write always goes", () => {
   const state = {};
-  const read = (t) => ({ entity: "/a.go", type: "file", time: t, is_write: false });
-  const write = (t) => ({ entity: "/a.go", type: "file", time: t, is_write: true });
+  // `t` is the beat's own moment in ms; the helper stores it as `time` in
+  // seconds, matching harness's payload, since throttle() now judges each
+  // beat by its own `time` rather than the batch's `nowMs`.
+  const read = (t) => ({ entity: "/a.go", type: "file", time: t / 1000, is_write: false });
+  const write = (t) => ({ entity: "/a.go", type: "file", time: t / 1000, is_write: true });
 
-  expect(throttle([read(1)], state, 0)).toHaveLength(1);
-  expect(throttle([read(2)], state, 30_000)).toHaveLength(0);       // inside the window
-  expect(throttle([write(3)], state, 40_000)).toHaveLength(1);      // writes are never throttled
-  // The write above refreshed seen["/a.go"] to 40_000, so the window is measured
-  // from there, not from t=0: 40_000 + THROTTLE_MS + 1_000 is just past it.
-  expect(throttle([read(4)], state, 40_000 + THROTTLE_MS + 1_000)).toHaveLength(1); // window expired
+  expect(throttle([read(0)], state, 0)).toHaveLength(1);
+  expect(throttle([read(30_000)], state, 30_000)).toHaveLength(0);       // inside the window
+  expect(throttle([write(40_000)], state, 40_000)).toHaveLength(1);      // writes are never throttled
+  // The write above refreshed seen["/a.go"] to 40_000 (from its own `time`),
+  // so the window is measured from there: 40_000 + THROTTLE_MS + 1_000 is
+  // just past it.
+  expect(throttle([read(40_000 + THROTTLE_MS + 1_000)], state, 40_000 + THROTTLE_MS + 1_000)).toHaveLength(1); // window expired
+});
+
+test("throttle judges each beat by its own time, not the batch's nowMs", () => {
+  const state = {};
+  const apartMs = THROTTLE_MS + 1_000; // > 120s apart
+  const beats = [
+    { entity: "/a.go", type: "file", time: 0, is_write: false },
+    { entity: "/a.go", type: "file", time: apartMs / 1000, is_write: false },
+  ];
+  // Both beats arrive in one throttle() call — one nowMs for the whole batch —
+  // but their own `time`s are more than 120s apart. Judging every beat in a
+  // call against a single shared clock reading would throw the second one
+  // away; per-beat time must not.
+  expect(throttle(beats, state, apartMs)).toHaveLength(2);
+});
+
+test("a beat with no time falls back to the batch's nowMs", () => {
+  const state = {};
+  const beats = [{ entity: "/a.go", type: "file", time: undefined, is_write: false }];
+  expect(throttle(beats, state, 5_000)).toHaveLength(1);
+  expect(state.wakatimeSeen["/a.go"]).toBe(5_000);
 });
 
 test("entities unseen for over a day are pruned from state", () => {
   const state = {};
-  throttle([{ entity: "/old.go", type: "file", time: 1, is_write: false }], state, 0);
+  const dayMs = 25 * 3600 * 1000;
+  throttle([{ entity: "/old.go", type: "file", time: 0, is_write: false }], state, 0);
   expect(Object.keys(state.wakatimeSeen)).toContain("/old.go");
 
-  throttle([{ entity: "/new.go", type: "file", time: 2, is_write: false }], state, 25 * 3600 * 1000);
+  // "/new.go"'s own `time` lines up with the batch's `nowMs` here (both 25h
+  // in) so it reads as freshly seen, not as stale as "/old.go" — otherwise
+  // the very call that adds it would immediately prune it right back out.
+  throttle([{ entity: "/new.go", type: "file", time: dayMs / 1000, is_write: false }], state, dayMs);
   expect(Object.keys(state.wakatimeSeen)).not.toContain("/old.go");
+  expect(Object.keys(state.wakatimeSeen)).toContain("/new.go");
 });

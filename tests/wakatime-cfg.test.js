@@ -40,6 +40,10 @@ disable_submodules = true
   // Keys outside [settings] must not leak in — [git]'s value would otherwise
   // become a stray field.
   expect(got.disable_submodules).toBeUndefined();
+  // Keys inside [settings] but not whitelisted must also not leak — proxy
+  // carries credentials and exclude carries patterns.
+  expect(got.proxy).toBeUndefined();
+  expect(got.exclude).toBeUndefined();
 });
 
 test("a malformed cfg is not fatal", () => {

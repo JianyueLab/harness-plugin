@@ -8,9 +8,10 @@
  * `api_url` matters as much as the key — self-hosted wakapi and hakatime are
  * common, and hardcoding wakatime.com locks those users out.
  *
- * Only `[settings]` is parsed, and only four keys out of it. `exclude`,
- * `include`, `proxy` and the rest are wakatime-cli's business; a parser that
- * threw on an unfamiliar line would break on WakaTime's next release.
+ * Only `[settings]` is parsed, and only three keys out of it: `api_key`,
+ * `api_url`, and `hide_file_names`. `exclude`, `include`, `proxy` and the rest
+ * are wakatime-cli's business; a parser that threw on an unfamiliar line would
+ * break on WakaTime's next release.
  */
 import fs from "node:fs";
 import os from "node:os";
@@ -23,6 +24,7 @@ export const STATE_DIR = path.join(os.homedir(), ".config", "jyl-wakatime");
 
 /** Parse the `[settings]` section of a wakatime.cfg. Never throws. */
 export function parseWakaCfg(text) {
+  const KNOWN = new Set(["api_key", "api_url", "hide_file_names"]);
   const out = {};
   let inSettings = false;
   for (const raw of String(text ?? "").split("\n")) {
@@ -35,7 +37,9 @@ export function parseWakaCfg(text) {
     if (!inSettings) continue;
     const eq = line.indexOf("=");
     if (eq < 0) continue; // continuation line of a multi-line value: not ours
-    out[line.slice(0, eq).trim()] = line.slice(eq + 1).trim();
+    const key = line.slice(0, eq).trim();
+    if (!KNOWN.has(key)) continue;
+    out[key] = line.slice(eq + 1).trim();
   }
   return out;
 }

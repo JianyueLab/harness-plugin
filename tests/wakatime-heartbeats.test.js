@@ -109,6 +109,31 @@ test("hide_file_names obfuscates the entity but keeps the project", () => {
   expect(file.project).toBe("harness");
 });
 
+// Final review M-5: the obfuscated entity keeps the extension, and nothing
+// asserted it -- mutating `obfuscate` to always return "HIDDEN" left all 187
+// tests green while both README ("`agent.go` becomes `HIDDEN.go`") and spec
+// ("keep the extension so language stats survive") quietly became false.
+// hide_file_names users would lose every language attribution and see no error.
+test("hide_file_names keeps the extension, and the language still comes from the real path", () => {
+  const beats = heartbeatsFrom(
+    {
+      ...payload,
+      tools: [
+        { name: "read_file", path: "/abs/agent/agent.go", at: 1, elapsed_ms: 1, is_error: false },
+        { name: "read_file", path: "/abs/agent/Makefile", at: 2, elapsed_ms: 1, is_error: false },
+      ],
+    },
+    { ...opts, hideFileNames: true },
+  );
+  const files = beats.filter((b) => b.type === "file");
+
+  expect(files[0].entity).toBe("HIDDEN.go");
+  expect(files[0].language).toBe("Go"); // language is read off the real path, before hiding
+  // Nothing to keep: a name with no extension obfuscates to the bare placeholder
+  // rather than to something like "HIDDEN.agent/Makefile".
+  expect(files[1].entity).toBe("HIDDEN");
+});
+
 test("an unknown extension omits language rather than guessing", () => {
   const odd = { ...payload, tools: [{ name: "read_file", path: "/a/b/thing.zzz", at: 1, elapsed_ms: 1, is_error: false }] };
   const file = heartbeatsFrom(odd, opts).find((b) => b.type === "file");

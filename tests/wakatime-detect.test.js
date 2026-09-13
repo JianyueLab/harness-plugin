@@ -52,6 +52,20 @@ test("git failure is survivable", () => {
   expect(got.branch).toBeNull();
 });
 
+// Final review M-6: `git rev-parse --abbrev-ref HEAD` prints the literal
+// string "HEAD" on a detached HEAD, and project.mjs filters it out. Nothing
+// asserted that: removing the filter left all 187 tests green while every
+// bisect, rebase or `git checkout <sha>` session would report a branch
+// literally named "HEAD" to WakaTime, polluting the branch breakdown.
+test("a detached HEAD reports no branch, not a branch named HEAD", () => {
+  const repo = path.join(root, "detached");
+  fs.mkdirSync(path.join(repo, ".git"), { recursive: true });
+
+  const got = detectProject(repo, {}, 1_000, () => "HEAD\n");
+  expect(got.project).toBe("detached");
+  expect(got.branch).toBeNull();
+});
+
 test("the branch is cached for 60s, then re-read", () => {
   const repo = path.join(root, "cached");
   fs.mkdirSync(path.join(repo, ".git"), { recursive: true });

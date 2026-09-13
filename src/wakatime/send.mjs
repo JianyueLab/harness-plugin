@@ -108,6 +108,28 @@ export function aiModelToken(model) {
     .trim()
     .replace(/[\s/]+/g, "-")
     .replace(/^-+|-+$/g, "");
+  // A model name this tool cannot put in a header reports **no model at all**,
+  // rather than a mangled bucket name or a request that cannot be sent.
+  //
+  // This is not defensive tidiness. `fetch` refuses a header value holding any
+  // codepoint above U+00FF -- measured on both runtimes this tool supports:
+  // bun 1.4.2 throws `TypeError: Header 'User-Agent' has invalid value`, node
+  // v26.8.2 throws `Cannot convert argument to a ByteString because the
+  // character at index 0 has a value of 27169 which is greater than 255`. That
+  // throw happens inside `postBatch`'s try, so it is classified as a *network*
+  // error: every heartbeat goes back to the spool, every run, forever, with a
+  // log line naming a header problem and nothing naming the cause. A model id
+  // reaches here straight from the user's own `config.toml`, so a non-ASCII one
+  // is reachable, not theoretical.
+  //
+  // The restriction is to printable ASCII rather than to latin1 (which the
+  // header layer does accept -- `café-5` goes out fine) because this token's
+  // only job is to be a stable bucket name in someone's dashboard, and a byte
+  // sequence whose reading depends on how the server decodes it is not stable.
+  // Dropping such a name costs one empty AI-model slot, which is a clean parse
+  // (probe P12: `ai_model: null`, everything else intact) -- against a reporter
+  // that silently never sends again.
+  if (!/^[\x21-\x7e]+$/.test(token)) return "";
   return /[a-z0-9]/i.test(token) ? token : "";
 }
 
@@ -130,6 +152,70 @@ export function userAgent({ harnessVersion, pluginVersion, platform, release, ar
   return parts.join(" ");
 }
 
+/**
+ * Which bucket a status code falls in. One function so a per-item code and a
+ * whole-request code can never be classified by two drifting rules.
+ *
+ *  - `ok`          — kept by WakaTime, nothing owed
+ *  - `auth`        — 401/403: back to the spool *and* bump `authFailures`
+ *  - `rateLimited` — 429: back to the spool
+ *  - `retry`       — 5xx and anything else transient: back to the spool
+ *  - `drop`        — every other non-2xx: the same bytes will be refused again
+ */
+function verdictFor(status) {
+  if (status >= 200 && status < 300) return "ok";
+  if (status === 401 || status === 403) return "auth";
+  if (status === 429) return "rateLimited";
+  if (status >= 500) return "retry";
+  return "drop";
+}
+
+/**
+ * The per-item verdicts inside an accepted bulk response, positionally
+ * aligned with the batch that was sent.
+ *
+ * **The shape here was observed, not inferred.** Task 8 posted real heartbeats
+ * to `api.wakatime.com` and recorded the reply (spec §5, §3): the bulk endpoint
+ * answers **`202 ACCEPTED`**, not 201, with a body of
+ * `{"responses": [[{"data": {"id": …}}, 201], …]}` — one `[body, status]` pair
+ * per heartbeat, in the order they were sent, with the per-item code nested one
+ * level deeper than §Sending's original "an array of per-item status codes"
+ * suggested.
+ *
+ * Returns an array of `number | null`, `null` meaning *this position carried no
+ * verdict*, which the caller reads as accepted. Unreadable bodies (not JSON, no
+ * `responses` key, an entry that is not a `[body, status]` pair) are "no
+ * information", never failure: a self-hosted wakapi or hakatime answering
+ * `202 {}` must not have every heartbeat it accepted reported as lost. The
+ * failure this whole function exists to end is the opposite one — silently
+ * counting a *rejection* as success — and that only needs the codes that are
+ * actually there to be read.
+ */
+export function perItemStatuses(bodyText, count) {
+  let body;
+  try {
+    body = JSON.parse(bodyText);
+  } catch {
+    return null;
+  }
+  const responses = body?.responses;
+  if (!Array.isArray(responses) || responses.length === 0) return null;
+
+  const out = [];
+  for (let i = 0; i < count; i++) {
+    const entry = responses[i];
+    out.push(Array.isArray(entry) && typeof entry[1] === "number" ? entry[1] : null);
+  }
+  return out;
+}
+
+/** `[400, 400, 503]` -> `"400 x2, 503 x1"`. Codes only: no response bodies. */
+function summarise(statuses) {
+  const counts = new Map();
+  for (const s of statuses) counts.set(s, (counts.get(s) ?? 0) + 1);
+  return [...counts].map(([status, n]) => `${status} x${n}`).join(", ");
+}
+
 async function postBatch(ctx, batch) {
   const url = `${ctx.apiUrl}/users/current/heartbeats.bulk`;
   const doFetch = ctx.fetch ?? fetch;
@@ -150,20 +236,27 @@ async function postBatch(ctx, batch) {
     return { retry: true, message: String(err?.message ?? err) };
   }
 
-  if (res.ok) return { ok: true };
-
+  // The body is read on the success path too, because "the request was
+  // accepted" and "the heartbeats were accepted" are two different facts here:
+  // a 202 carries a verdict per heartbeat, and reading only `res.ok` is how
+  // individually-rejected heartbeats used to be counted as delivered.
   const text = await res.text().catch(() => "");
+
+  if (res.ok) return { ok: true, statuses: perItemStatuses(text, batch.length) };
+
   // 401/403 retries for the same reason upload.mjs spools them: a revoked or
   // mistyped key is a configuration problem someone will fix, and the hours
   // behind it are worth keeping. The spool cap is what stops it growing
   // forever, and `authFailed` is what --status shouts about.
-  if (res.status === 401 || res.status === 403) {
-    return { retry: true, auth: true, status: res.status, message: text };
-  }
-  if (res.status === 429 || res.status >= 500) {
-    return { retry: true, rateLimited: res.status === 429, status: res.status, message: text };
-  }
-  return { retry: false, status: res.status, message: text };
+  const verdict = verdictFor(res.status);
+  if (verdict === "drop") return { retry: false, status: res.status, message: text };
+  return {
+    retry: true,
+    auth: verdict === "auth",
+    rateLimited: verdict === "rateLimited",
+    status: res.status,
+    message: text,
+  };
 }
 
 export async function sendAll(ctx, beats) {
@@ -177,7 +270,54 @@ export async function sendAll(ctx, beats) {
     tally.sent += batch.length;
 
     if (result.ok) {
-      tally.accepted += batch.length;
+      // The request was accepted; each heartbeat inside it may still have been
+      // refused on its own. Spec §Sending has always promised those are
+      // logged; before this they were counted as accepted and left no trace at
+      // all -- measured against a fake service answering 202 with a 400 for
+      // every item: `spool 0, accepted 3, failed 0`, no PROBLEM, no log file.
+      // Every indicator healthy, every heartbeat gone.
+      if (!result.statuses) {
+        tally.accepted += batch.length;
+        continue;
+      }
+
+      const dropped = [];
+      const deferred = [];
+      for (let j = 0; j < batch.length; j++) {
+        const status = result.statuses[j];
+        // A position the response said nothing about is accepted: see
+        // perItemStatuses on why silence is not failure.
+        const verdict = status === null ? "ok" : verdictFor(status);
+        if (verdict === "ok") {
+          tally.accepted += 1;
+          continue;
+        }
+        if (verdict === "drop") {
+          dropped.push(status);
+          continue;
+        }
+        // Everything the shared classifier calls transient is spooled, by the
+        // same rule the whole-request path uses -- a heartbeat refused with a
+        // per-item 503 or 401 is owed, not lost. What is *not* inherited is the
+        // 429 rule's "stop sending further batches this run": that rule reads a
+        // refused *request* as the endpoint pushing back on traffic, and a 202
+        // is the endpoint accepting the traffic and objecting to one row in it.
+        deferred.push(status);
+        failed.push(batch[j]);
+        if (verdict === "auth") authFailed = true;
+      }
+
+      tally.rejected += dropped.length;
+      if (dropped.length) {
+        ctx.log(
+          `wakatime rejected ${dropped.length} of ${batch.length} heartbeat(s) individually, dropping: ${summarise(dropped)}`,
+        );
+      }
+      if (deferred.length) {
+        ctx.log(
+          `wakatime deferred ${deferred.length} of ${batch.length} heartbeat(s) individually (will retry): ${summarise(deferred)}`,
+        );
+      }
       continue;
     }
     if (!result.retry) {

@@ -1,9 +1,14 @@
 # Reporting harness activity to WakaTime
 
 **Status:** implemented, documented and verified against the real WakaTime
-service (Tasks 1–8). See "Verified against the real service" at the end for what
-was observed, what is still unverified (a real agent run; the rendered
-dashboard), and four findings recorded but deliberately not implemented.
+service (Tasks 1–8), then given one fix round after the whole-branch final
+review. See "Verified against the real service" at the end for what was
+observed and what is still unverified (a real agent run; the rendered
+dashboard). Two of the findings recorded there as "not implemented" have since
+been implemented — the AI-model slot (§7/§8) and the per-item verdicts inside a
+`202` (§5, now described by §Sending); the machine-name and
+`ai_subscription_plan` findings stand as recorded, both because acting on them
+would send data that does not leave the machine today.
 **Date:** 2026-09-12
 **Repos touched:** `JianyueLab/claude-plugin` (this one), `JianyueLab/harness`
 **Depends on:** harness's `RunEnd` hook —
@@ -315,18 +320,29 @@ sent within 120 seconds, unless it is a write.
 Same rule here. The last-sent time per entity lives in `state.json` via
 `store.saveState` — **not** in `store`'s `seen` file, which is a set of keys and
 cannot carry a timestamp. Entities not seen for over 24 hours are pruned on
-write so the file cannot grow without bound.
+every call — including a call that emits nothing — so the file cannot grow
+without bound.
 
 Writes are never throttled: `edit_file` is the signal WakaTime cares most about.
 
 ## Sending
 
 `POST <api_url>/users/current/heartbeats.bulk`, **25 heartbeats per request**
-(the documented cap). A 201 comes back with an array of per-item status codes;
-items that individually failed are logged, not retried — a heartbeat WakaTime
-rejected on content will be rejected again.
+(the documented cap).
 
-Failure classification, mirroring `upload.mjs`:
+**A request being accepted does not mean its heartbeats were.** The endpoint
+answers `202 ACCEPTED` with a per-item verdict for each heartbeat, nested one
+level deeper than an array of codes: `{"responses": [[<body>, 201], …]}`, in the
+order they were sent (observed first-hand — §5). Those codes are read: only
+`2xx` items count as accepted, and the rest are logged — once per batch, as
+counts by code, never response bodies. Reading only the HTTP status of the
+request itself is how individually-rejected heartbeats get counted as delivered
+and leave no trace anywhere, which is the worst available failure for a tool
+whose only job is bookkeeping.
+
+Failure classification, mirroring `upload.mjs`. **The same table decides a
+per-item code and a whole-request one** — one classifier, so the two cannot
+drift — with one exception noted below it:
 
 | Response | Verdict |
 |---|---|
@@ -334,7 +350,20 @@ Failure classification, mirroring `upload.mjs`:
 | 429 | retry — back to the spool, and stop sending further batches this run |
 | 5xx | retry — back to the spool |
 | 401 / 403 | retry — back to the spool, **and** record a `authFailures` counter in state |
-| 400 | drop the batch, log it |
+| any other non-2xx (400, 404, 422, 451 …) | drop the batch, log it |
+
+The last row is the ordinary per-item case: a heartbeat WakaTime rejected on
+content will be rejected again, so it is logged and dropped rather than retried.
+The exception: a **per-item** 429 spools that heartbeat but does *not* stop the
+run. "Stop sending" reads a refused *request* as the endpoint pushing back on
+traffic; a 202 is the endpoint accepting the traffic and objecting to one row
+inside it.
+
+A body that carries no per-item verdict at all — not JSON, no `responses` key,
+an empty array, an entry that is not a `[body, status]` pair — is read as *no
+information*, i.e. accepted. A self-hosted wakapi or hakatime answering `202 {}`
+must not have everything it accepted reported as lost; the failure this reading
+exists to prevent is the opposite one.
 
 401 spools rather than drops because a revoked or mistyped key is a
 configuration problem someone will fix, and the hours behind it are worth
@@ -376,7 +405,11 @@ instructions — not softened, and not in a footnote under `jyl-usage`'s
 
 What it sends: absolute file paths, project name, git branch, language, token
 counts (fresh and cached separately), prompt length in characters, **the model
-id**, and a per-run session id.
+id**, and a session id — **not one this tool invents per run**, but the id
+harness generates once per *process* (`newSessionID()` is called once, at
+`cmd/harness/main.go`, and stamped into every payload that process sends). So
+one value links every run of one harness session, which is more linkable than
+"per-run" suggests and is the number stated here for exactly that reason.
 
 **The model id is sent. An earlier version of this section said it was not, and
 explained why — that explanation was wrong.** The reasoning was "there is
@@ -469,9 +502,23 @@ WakaTime's own users already understand.
 ## Failure modes
 
 **Nothing here may make a harness turn go red.** `scripts/wakatime` follows
-`scripts/run`'s rule verbatim — never exit non-zero, not even with no runtime
-on `PATH`. harness's side already treats a hook failure as a notice rather than
-an error, so the two agree.
+`scripts/run`'s rule — never exit non-zero: not with no runtime on `PATH`, not
+with a `JYL_WAKATIME_RUNTIME` that is executable but fails, and not with a
+checkout that has lost `src/wakatime/main.mjs`. (The launcher therefore does
+**not** `exec` the runtime, unlike `scripts/run`: `exec` hands the runtime's own
+exit code to harness, which would make the invariant a promise held by whatever
+is on `PATH`.) harness's side already treats a hook failure as a notice rather
+than an error, so the two agree.
+
+**The one exception, named rather than claimed away:** if no `sh` can be
+resolved for the `#!/usr/bin/env sh` shebang, `env` reports **127** with not one
+line of the script executed. A shell script cannot intercept its own interpreter
+going missing; nothing inside this design can cover that path.
+
+The two failures that used to exit non-zero are now diagnosed the same way "no
+runtime on `PATH`" is — a line appended to `$HOME/.config/jyl-wakatime/log`,
+because harness discards hook stderr and this tool's own logger is exactly what
+is unavailable on those paths.
 
 The cost of that is silence, and silence is how a broken reporter goes
 unnoticed for a month. The one antidote is `--status`:
@@ -482,7 +529,7 @@ jyl-wakatime 0.1.0
   api url     https://api.wakatime.com/api/v1
   api key     waka…9f3c   (from ~/.wakatime.cfg)
   spool       0 heartbeat(s)
-  last send   2026-09-12T06:14:02Z  ok, 12 accepted
+  last send   2026-09-12T06:14:02.483Z  accepted 12, failed 0
   auth fails  0
 ```
 
@@ -497,6 +544,8 @@ jyl-wakatime 0.1.0
 | spool at 5000 | `store.writeSpool` drops oldest and logs it — a silent cap reads as "everything was sent" |
 | two sessions flush at once | `store.withLock`; the loser bows out and the next turn picks it up |
 | `git` not on `PATH` | no `branch`, project falls back to the basename |
+| individual heartbeats rejected inside a `202` | counted as rejected (never as accepted), logged once per batch by code, dropped — see §Sending |
+| no runtime on `PATH`, or a `JYL_WAKATIME_RUNTIME` that fails, or a missing `src/wakatime/main.mjs` | exit 0, one line in the log naming which of the three it was |
 
 ## Testing
 
@@ -520,12 +569,19 @@ jyl-wakatime 0.1.0
 7. **Batching** — 60 heartbeats go out as 25 / 25 / 10.
 8. **Failure classification** — 429, 500, 401, 400 each land in the right
    bucket; the spool holds what should be retried and not what was dropped.
+   **Per item as well as per request:** a `202` whose `responses` mix `201` with
+   a `400` counts only the `201`s as accepted and logs the rest; a per-item
+   `500`/`401` goes back to the spool and a per-item `401` raises `authFailed`;
+   a `202` carrying no per-item verdict counts the batch as accepted.
 9. **Spool cap** — 5001 in, 5000 kept, the oldest gone, one log line (this is
    `store`'s behaviour, asserted here because jyl-wakatime relies on it).
 10. **`hide_file_names`** — entities obfuscated, project still present.
 11. **Language table** — a known extension maps, an unknown one omits the field.
 12. **Never exits non-zero** — no runtime, bad stdin, no key, unwritable state
-    dir: exit code 0 in every case.
+    dir, a `JYL_WAKATIME_RUNTIME` that is executable but fails, a checkout with
+    no `src/wakatime/main.mjs`: exit code 0 in every case, and the last two
+    leave a log line saying which. (The missing-`sh` shebang case is out of
+    reach from inside the script — see §Failure modes.)
 13. **The User-Agent's fixed shape.** The `go` token sits between the platform
     group and the model slot, and is present even when there is no model —
     it is what keeps `wakatime/1.0.0` out of that slot, so a "tidy-up" that
@@ -535,11 +591,24 @@ jyl-wakatime 0.1.0
     re-create the bucket-by-vendor shape. Both whitespace and `/` are collapsed
     to `-`, stranded end hyphens trimmed, a name with nothing alphanumeric left
     reporting no model at all; no model means no token rather than a literal
-    `undefined`. The UA stays exactly six tokens whatever the model contains.
+    `undefined`. The UA stays exactly six tokens whatever the model contains,
+    and **is always a legal header value**: a model name carrying anything
+    outside printable ASCII reports no model rather than a mangled bucket, since
+    `fetch` refuses a header holding a codepoint above U+00FF and that throw is
+    indistinguishable from a network error — every heartbeat back to the spool,
+    every run, with nothing naming the cause. Model ids come from the user's own
+    `config.toml`, so this is reachable.
 14. **`payload.model` actually reaches `userAgent()`.** Asserted on the `ctx`
     `runHook` builds, not on `userAgent` in isolation — dropping that one
     property is exactly the regression that silently restores the phantom
     "Wakatime" model, and nothing else in the suite would go red.
+15. **The production wiring, not only the collaborators.** One test drives
+    `runHook` with **no** `send` override and stubs `fetch` instead, so mapper →
+    `sendAll` → `postBatch` → URL/auth/User-Agent assembly → the `accepted`
+    count `--status` prints runs as one chain. Every seam listed here was, at
+    one point, mutable to a no-op with the whole suite still green:
+    `send = sendAll` itself, `tally.accepted`, `state.wakatimeAuthFailures`,
+    `hideFileNames`'s wiring into the mapper, and the request timeout.
 
 `tests/fixtures/runend.json` is the shared contract fixture; a test asserts it
 parses into the fields the mapper expects, which is what makes a harness-side
@@ -780,10 +849,14 @@ because a file was examined. Grepping the whole state directory (including
 
 - **`POST …/heartbeats.bulk` answers `202 ACCEPTED`, not `201`**, with a body of
   `{"responses": [[{"data": {"id": …}}, 201]]}` — per-item codes nested one level
-  deeper than "an array of per-item status codes" suggests. `send.mjs` treats any
-  `res.ok` as success and does not read the per-item codes at all, so the Sending
-  section's "items that individually failed are logged" does not describe the
-  code. Observed, not changed.
+  deeper than "an array of per-item status codes" suggests. At the time of this
+  observation `send.mjs` treated any `res.ok` as success and did not read the
+  per-item codes at all, so the Sending section's "items that individually failed
+  are logged" did not describe the code. **Changed after the whole-branch final
+  review** (which measured the consequence: three heartbeats refused item by item
+  came back as `spool 0, accepted 3, failed 0`, no PROBLEM and no log file at
+  all). §Sending now describes what the code does, and the shape it reads is the
+  one recorded here — no second live request was made to establish it.
 - **`category: "ai coding"` is accepted and comes back as `"AI Coding"`.**
 - **The machine is reported as "Unknown Hostname".** The day's `machines`
   breakdown attributes exactly `68.267582s` — all of harness's time — to

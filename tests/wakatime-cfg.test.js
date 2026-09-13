@@ -120,6 +120,18 @@ test("JYL_WAKATIME_DISABLED switches it off", () => {
   expect(configProblem(cfg)).toBe("disabled");
 });
 
+// Final review M-8: configProblem's bad-`api_url` branch had no test at all --
+// making it return `null` instead left the whole suite green. A garbage
+// `api_url` (a self-hosted wakapi entered without a scheme, say) would then
+// spool forever behind a bare network-error log line, with `--status` showing
+// no PROBLEM: the tool's only surface for saying why nothing is arriving.
+test("an api_url that is not a URL is a problem, and says which value is wrong", () => {
+  const cfg = { apiKey: "k", apiUrl: "wakapi.example/api/v1", enabled: true };
+  expect(configProblem(cfg)).toBe("api url is not a URL: wakapi.example/api/v1");
+  // ...and a real one is not.
+  expect(configProblem({ ...cfg, apiUrl: DEFAULT_API_URL })).toBeNull();
+});
+
 test("redactKey never shows the middle", () => {
   expect(redactKey("waka_0123456789abcdef")).toBe("waka…cdef");
   expect(redactKey("")).toBe("(unset)");
@@ -328,6 +340,36 @@ test("execVaultCmd expands a leading ~/ to $HOME before executing, not the devel
     );
     expect(result.status).toBe(0);
     expect(JSON.parse(result.stdout)).toEqual({ key: "tilde-expanded-secret", problem: null });
+  } finally {
+    fs.rmSync(fakeHome, { recursive: true, force: true });
+  }
+});
+
+// Final review M-9: the expansion is `.map(expandTilde)` over *every* argv
+// token, and only argv[0] was covered -- expanding the command name alone left
+// all 187 tests green, while `vault-cli --config ~/.vault.toml` (the obvious
+// real shape, and what the docs promise) would hand the vault CLI a literal
+// `~/...` path and fail with a diagnosis that says nothing about tildes.
+// Subprocess, with $HOME set at spawn time, for the same reason as the test
+// above: bun reads $HOME once at launch. Never the developer's real home.
+test("execVaultCmd expands a leading ~/ in arguments too, not only in the command name", () => {
+  const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), "jyl-waka-fakehome-arg-"));
+  try {
+    const script = path.join(fakeHome, "echo-arg.sh");
+    // Echoes the argument it was given: whatever the tokenizer produced is
+    // what comes back as the "key".
+    fs.writeFileSync(script, '#!/bin/sh\nprintf "%s" "$1"\n');
+    fs.chmodSync(script, 0o755);
+
+    const result = runProbe(
+      `const r = execVaultCmd(${JSON.stringify(script)} + " ~/vaults/prod.toml"); process.stdout.write(JSON.stringify(r));`,
+      { env: { ...process.env, HOME: fakeHome } },
+    );
+    expect(result.status).toBe(0);
+    expect(JSON.parse(result.stdout)).toEqual({
+      key: path.join(fakeHome, "vaults/prod.toml"),
+      problem: null,
+    });
   } finally {
     fs.rmSync(fakeHome, { recursive: true, force: true });
   }

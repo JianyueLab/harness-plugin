@@ -601,6 +601,13 @@ test("token fields ride only on the run heartbeat", () => {
   expect(run.ai_session).toBe("3f9a1c7e2b4d5068");
   expect(run.ai_prompt_length).toBe(214);
   expect(run.ai_output_tokens).toBe(887);
+  // SUPERSEDED — do not re-execute this assertion. Task 8 established against
+  // the live API that `ai_cached_input_tokens` exists and is writable, so the
+  // shipped mapper puts `cache_read_input_tokens` there instead of folding it
+  // in: `ai_input_tokens` is `input_tokens + cache_creation_input_tokens`. The
+  // spec's "Heartbeat mapping" section is the authority. Re-running this task
+  // from the plan as written would re-introduce a defect that was only found by
+  // probing the real service.
   // All three input counters summed: cache reads are tokens the model
   // processed and the subscription paid for.
   expect(run.ai_input_tokens).toBe(12043 + 11800 + 0);
@@ -725,6 +732,12 @@ export function heartbeatsFrom(payload, { project, branch, hideFileNames } = {})
     time: payload.ended_at,
     category: CATEGORY,
     ai_session: payload.session_id,
+    // SUPERSEDED — the shipped code splits these. "WakaTime has no field to
+    // split them out" was checked against the live API in Task 8 and is false:
+    // `ai_cached_input_tokens` exists and is writable. What ships is
+    // `ai_input_tokens: input_tokens + cache_creation_input_tokens` plus
+    // `ai_cached_input_tokens: cache_read_input_tokens`. See the spec's
+    // "Heartbeat mapping"; it wins over this plan.
     // All three input counters. Cache reads are tokens the model processed and
     // the subscription paid for; WakaTime has no field to split them out.
     ai_input_tokens:

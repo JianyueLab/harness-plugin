@@ -6,12 +6,52 @@
 # one entry point is how a shared config path and an accidental cross-import
 # get introduced later.
 #
-# Never exits non-zero. This is bookkeeping; a harness run must not go red
-# because a reporter could not find a runtime.
+# Never exits non-zero once it is running. This is bookkeeping; a harness run
+# must not go red because a reporter could not find a runtime, could not find
+# its own entry point, or was pointed at a JYL_WAKATIME_RUNTIME that is not a
+# working JS runtime. Each of those used to leave with the failing command's
+# own exit code (127 / 1 / whatever the runtime returned).
+#
+# The one exit code this script cannot control is the one produced *before* it
+# runs: `#!/usr/bin/env sh` with no `sh` resolvable on PATH fails in `env`,
+# which reports 127 with nothing of this file executed. No line inside a shell
+# script can intercept its own interpreter going missing; it is named in the
+# README rather than silently claimed away.
 set -eu
 
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 ENTRY="$ROOT/src/wakatime/main.mjs"
+
+# Best-effort trace for the failures that stop this script before the JS ever
+# gets to run -- the JS is exactly what is unavailable on these paths, so its
+# own log call cannot be used.
+#
+# harness discards a hook's stderr and only raises a Problem on a non-zero exit
+# (which this script never does, on purpose), so the stderr line this writes is
+# invisible from inside harness and the log line is the only trace. Without it,
+# these failures are silent and undiagnosable: `--status`, run from a shell that
+# *does* have bun on PATH and from a checkout that is intact, looks perfectly
+# healthy. Best-effort throughout: a read-only or absent $HOME must not turn a
+# missing runtime into a non-zero exit.
+#
+# This path MUST stay byte-for-byte in sync with STATE_DIR in
+# src/wakatime/cfg.mjs -- that JS constant is the single source of truth for
+# where this tool's state lives. It deliberately does NOT read $XDG_CONFIG_HOME:
+# os.homedir() in cfg.mjs never does either, so a shell computation that did
+# would silently write these lines to a directory --status never reads. If
+# STATE_DIR ever becomes XDG-aware, this has to move with it.
+# Every line here is guarded and the function always returns 0: under `set -e`
+# a failing `note` would abort the script with *its* status, which is the exact
+# non-zero exit it exists to report. That is reachable -- a closed stderr makes
+# the echo fail -- so it is closed here rather than assumed away. `$HOME` is
+# read defensively for the same reason: unset, `set -u` alone would abort.
+note() {
+  LOGDIR="${HOME:-}/.config/jyl-wakatime"
+  mkdir -p "$LOGDIR" 2>/dev/null || true
+  printf '%s jyl-wakatime: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$1" >>"$LOGDIR/log" 2>/dev/null || true
+  echo "jyl-wakatime: $1" >&2 || true
+  return 0
+}
 
 # A project-level NODE_OPTIONS is meant for that project's code, not for a
 # hook it knows nothing about.
@@ -39,34 +79,36 @@ if [ "$DETACH" = "1" ]; then
   exit 0
 fi
 
+# A checkout that moved, was partially installed, or lost this file leaves the
+# runtime to fail with its own non-zero exit code and a stack trace harness
+# throws away. Diagnose it here instead, on the same terms as a missing runtime.
+if [ ! -f "$ENTRY" ]; then
+  note "entry point missing at $ENTRY; not reporting"
+  exit 0
+fi
+
+# Deliberately not `exec`: exec replaces this shell with the runtime, which
+# makes the runtime's exit code the launcher's, and "never exits non-zero"
+# would then be a promise held by whatever is on PATH rather than by this
+# script. A runtime that is executable but broken (a JYL_WAKATIME_RUNTIME
+# pointing at something that is not a JS runtime, a bun that cannot start) is
+# the reachable case; main.mjs's own exit code is always 0 by construction.
+# The cost is one extra `sh` alive for the duration of the run -- which under
+# the documented `--detach` invocation is already backgrounded and detached.
 if [ -n "${JYL_WAKATIME_RUNTIME:-}" ] && [ -x "${JYL_WAKATIME_RUNTIME}" ]; then
-  exec "${JYL_WAKATIME_RUNTIME}" "$ENTRY" "$@"
+  "${JYL_WAKATIME_RUNTIME}" "$ENTRY" "$@" || note "JYL_WAKATIME_RUNTIME exited $?; not reporting"
+  exit 0
 fi
 
 if command -v bun >/dev/null 2>&1; then
-  exec bun "$ENTRY" "$@"
+  bun "$ENTRY" "$@" || note "bun exited $?; not reporting"
+  exit 0
 fi
 
 if command -v node >/dev/null 2>&1; then
-  exec node "$ENTRY" "$@"
+  node "$ENTRY" "$@" || note "node exited $?; not reporting"
+  exit 0
 fi
 
-# harness discards a hook's stderr and only raises a Problem on a non-zero
-# exit (this script never does that, on purpose) -- so the stderr line above
-# is invisible from inside harness. Without this, "no runtime on PATH" is a
-# silent, undiagnosable failure: --status run from a shell that *does* have
-# bun on PATH looks perfectly healthy. Best-effort: a read-only $HOME must
-# not turn "no runtime" into a non-zero exit.
-#
-# This path MUST stay byte-for-byte in sync with STATE_DIR in
-# src/wakatime/cfg.mjs -- that JS constant is the single source of truth for
-# where this tool's state lives, and this shell line only exists because the
-# JS never got to run. It deliberately does NOT read $XDG_CONFIG_HOME:
-# os.homedir() in cfg.mjs never does either, so a shell computation that did
-# would silently write this fallback line to a directory --status never
-# reads. If STATE_DIR ever becomes XDG-aware, this line has to move with it.
-LOGDIR="$HOME/.config/jyl-wakatime"
-mkdir -p "$LOGDIR" 2>/dev/null || true
-printf '%s jyl-wakatime: no bun or node on PATH; not reporting\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >>"$LOGDIR/log" 2>/dev/null || true
-echo "jyl-wakatime: no bun or node on PATH; not reporting. Set JYL_WAKATIME_RUNTIME to an absolute path to override." >&2
+note "no bun or node on PATH; not reporting. Set JYL_WAKATIME_RUNTIME to an absolute path to override."
 exit 0

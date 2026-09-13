@@ -422,6 +422,13 @@ which model did the work, not what the work was. If a model id is more than you
 want to share, the file paths already are too; use `hide_file_names`, or do not
 install this.
 
+One kind of model name never reaches the dashboard: one written outside
+printable ASCII — a gateway alias in Chinese, say. The model slot lives in the
+User-Agent, and an HTTP header cannot carry those characters (`fetch` refuses
+the whole request), so such a name is reported as **no model** rather than
+quietly turning every send into a network error that respools forever.
+Everything else about those runs — files, project, branch, tokens — still goes.
+
 One caveat about those token counts: when a run's `outcome` is `"cancelled"`
 or `"error"` instead of `"ok"`, harness may not have finished accumulating
 that run's *last* turn of usage before it returned — the failing path exits
@@ -448,7 +455,12 @@ hook, so this is usually the same `PATH` your shell has). If no runtime is
 found, `scripts/wakatime` writes a line to stderr *and*, since harness
 discards a hook's stderr and never runs `--status` for you, to
 `~/.config/jyl-wakatime/log` — the one thing that keeps this specific failure
-from being completely invisible (see "Is it working?" below). And the API
+from being completely invisible (see "Is it working?" below). The same line
+is written, naming the case, for the two other ways this can break before the
+JS runs: a **moved or half-copied checkout** (`entry point missing at …`, the
+failure the "somewhere that will not move" warning above is about) and a
+`JYL_WAKATIME_RUNTIME` that exists and is executable but is not a working JS
+runtime (`JYL_WAKATIME_RUNTIME exited N`). And the API
 key itself comes from WakaTime, not this repo: your account's [API key
 settings page](https://wakatime.com/settings/account#apikey), or the
 equivalent settings page on your self-hosted wakapi/hakatime instance.
@@ -575,9 +587,14 @@ purpose.) An install with no key configured is inert, exactly like
 
 ### Is it working? (`--status`)
 
-**jyl-wakatime never exits non-zero and never throws, on any path** — a bad
-config, a network failure, an unwritable state directory, none of it may
-turn a harness run red. That agrees with harness's own side: a hook failure
+**jyl-wakatime never exits non-zero and never throws, on any path it can
+reach** — a bad config, a network failure, an unwritable state directory, no
+runtime on `PATH`, a `JYL_WAKATIME_RUNTIME` that fails, a checkout missing
+`src/wakatime/main.mjs`: none of it may turn a harness run red. (The one
+exception is not reachable from inside the script: if no `sh` can be found for
+`scripts/wakatime`'s `#!/usr/bin/env sh` line, `env` reports 127 before a single
+line of it runs. Nothing in a shell script can catch its own interpreter going
+missing.) That agrees with harness's own side: a hook failure
 there is a notice, never an error that fails the run. The cost is silence —
 a broken reporter fails exactly as quietly as a working one, on every
 surface except this one:
@@ -608,7 +625,7 @@ reports what the most recent attempt actually did — for example:
 | `spool` | heartbeats that failed on their most recent send attempt — a network error, a 429, a 5xx, or a 401/403 all land here — waiting for the next retry, either the next hook run or `--flush` (below). Should trend toward 0 across runs, not up. Capped at 5000 — past that, the oldest are dropped, logged as `spool overflow: dropped N oldest events` |
 | `last send` | `accepted N, failed M` from the most recent attempt; `failed` staying above 0 across several runs means something is wrong, not a fluke |
 | `auth fails` | counts *consecutive runs that had something to send* and got a 401/403 back; a run that sends successfully, or fails for a different reason, resets it to 0 — but a run with nothing queued at all does neither, so a stale nonzero value can persist through a quiet gap. Nonzero means the key WakaTime saw the last time this tool actually tried to send was wrong or revoked |
-| `accepted 0` with an **empty spool and no `PROBLEM` line** | the dangerous healthy-looking reading. WakaTime rejected every heartbeat outright with a non-retryable 4xx (anything but 401/403/429) — `send.mjs` drops that batch for good, so it never reaches the spool and nothing here flags it. This is not hypothetical: a mistyped path on a self-hosted wakapi/hakatime `api_url` produces exactly this. Every field above reads as a healthy, idle tool while every heartbeat from that run went in the bin; the only trace is the log, a line like `wakatime rejected 3 heartbeat(s), dropping: 400 bad request` |
+| `accepted 0` with an **empty spool and no `PROBLEM` line** | the dangerous healthy-looking reading. Two ways to get here, both meaning "everything went in the bin". **The whole request was refused** with a non-retryable 4xx (anything but 401/403/429) — `send.mjs` drops that batch for good, so it never reaches the spool. Not hypothetical: a mistyped path on a self-hosted wakapi/hakatime `api_url` produces exactly this. Or **the request was accepted and each heartbeat inside it was refused** — WakaTime answers `202` with a status per heartbeat, and a heartbeat rejected on content is dropped for the same reason. Either way the only trace is the log: `wakatime rejected 3 heartbeat(s), dropping: 400 bad request` for the whole-request case, `wakatime rejected 3 of 3 heartbeat(s) individually, dropping: 400 x3` for the per-item one. What `accepted` counts is heartbeats WakaTime said it **kept** — never heartbeats merely handed over — which is what makes this reading a signal at all |
 
 The full log behind that summary is `~/.config/jyl-wakatime/log`, capped at
 256 KB — the same rotation `jyl-usage` uses, from the `src/core/store.mjs`

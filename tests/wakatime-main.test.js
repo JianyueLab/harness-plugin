@@ -515,6 +515,161 @@ test("M5: --flush discards stdin and only drains the pre-existing spool", async 
   expect(store.readSpool()).toHaveLength(0); // drained: send() accepted it
 });
 
+// --- Final review, single fix round (I-1, I-3, I-4, M-5, M-7, M-12) -------
+
+// I-1 (Important): every test above injects its own `send`, so `send = sendAll`
+// -- the one line connecting the mapper to the network -- was guarded by
+// nothing. Measured: replacing it with a no-op returning an empty tally left
+// all 187 tests green, and the tool would map, throttle, write
+// `wakatimeLastSend`, clear the spool and log nothing: a healthy-looking
+// install that has never sent a heartbeat in its life.
+//
+// So this one passes NO send override and stubs the layer underneath instead.
+// `postBatch` uses `ctx.fetch ?? fetch`, and runHook's ctx carries no `fetch`,
+// so the global is exactly what production reaches -- which makes this the real
+// chain: mapper -> sendAll -> postBatch -> URL, auth header and User-Agent
+// assembly -> the tally that `--status` reports. It also covers I-4's
+// `tally.accepted` producer and M-7's request timeout. `apiUrl`'s host does not
+// resolve, so even a stub that failed to install could not reach a network.
+test("I-1: with no send override, the real sendAll posts to the real URL with the real headers", async () => {
+  const store = freshStore("default-send");
+  const calls = [];
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async (url, init) => {
+    calls.push({ url, init });
+    return new Response(
+      JSON.stringify({ responses: [[{ data: { id: 1 } }, 201], [{ data: { id: 2 } }, 201], [{ data: { id: 3 } }, 201]] }),
+      { status: 202 },
+    );
+  };
+  const cfg = { apiKey: "waka_notarealkey_1234", apiUrl: "https://x.invalid/api/v1", hideFileNames: false, enabled: true };
+  try {
+    await runHook({ store, stdinText: fixture, cfg, now: 1_000, runGit: () => "" });
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+
+  expect(calls).toHaveLength(1);
+  expect(calls[0].url).toBe("https://x.invalid/api/v1/users/current/heartbeats.bulk");
+  expect(calls[0].url).not.toContain("waka_notarealkey"); // the key is never in a URL
+  expect(calls[0].init.headers.Authorization).toBe(`Basic ${Buffer.from(cfg.apiKey).toString("base64")}`);
+  expect(calls[0].init.headers["User-Agent"]).toContain(" claude-opus-5 "); // payload.model, through the whole chain
+  expect(calls[0].init.headers["User-Agent"]).toContain(" go0.0.0 ");
+  // M-7 (Minor): the request timeout is untested; removing `signal:` leaves the
+  // suite green while a hung socket holds store.withLock until store's own 60s
+  // stale-lock reaper takes it away.
+  expect(calls[0].init.signal).toBeInstanceOf(AbortSignal);
+  expect(calls[0].init.signal.aborted).toBe(false);
+
+  const body = JSON.parse(calls[0].init.body);
+  expect(body).toHaveLength(3);
+  expect(body.filter((b) => b.type === "file")).toHaveLength(2);
+
+  // I-4 (Important): `accepted` is produced by sendAll, not by the stub the
+  // renderer test feeds -- this is the only place the real producer reaches
+  // --status.
+  expect(renderStatus({ store, cfg })).toContain("accepted 3, failed 0");
+  expect(store.readSpool()).toHaveLength(0);
+});
+
+// I-3 (Important): `loadWakaConfig`'s resolution of hide_file_names is tested,
+// and `heartbeatsFrom`'s obfuscation is tested, but the wire between them was
+// not: deleting `hideFileNames: cfg.hideFileNames` from runHook's
+// heartbeatsFrom call shipped every absolute path anyway, with all 187 green.
+// This is the branch's only user-facing privacy control, on the one tool here
+// whose premise is that paths leave the machine deliberately.
+test("I-3: hide_file_names set in the config reaches the heartbeats that actually go out", async () => {
+  const store = freshStore("hidden");
+  const sent = [];
+  await runHook({
+    store,
+    stdinText: fixture,
+    cfg: { apiKey: "k", apiUrl: "https://x/api/v1", hideFileNames: true, enabled: true },
+    now: 1_000,
+    runGit: () => "",
+    send: async (_ctx, beats) => {
+      sent.push(...beats);
+      return { tally: { sent: beats.length, accepted: beats.length }, failed: [], authFailed: false };
+    },
+  });
+
+  const files = sent.filter((b) => b.type === "file");
+  expect(files.length).toBeGreaterThan(0);
+  for (const f of files) {
+    // M-5 (Minor): the extension survives obfuscation, which is what keeps
+    // language stats working for hide_file_names users -- `HIDDEN` alone
+    // would make both README and spec false.
+    expect(f.entity).toBe("HIDDEN.go");
+    expect(f.project).toBe("harness"); // the project is still reported
+  }
+  // Nothing that goes out carries a path from the payload, on any beat.
+  expect(JSON.stringify(sent)).not.toContain("/abs/");
+  expect(JSON.stringify(sent)).not.toContain("agent.go");
+});
+
+// I-4 (Important), second half: `state.wakatimeAuthFailures` is the number
+// --status shouts with, and its wiring had no test -- setting it to 0
+// unconditionally left all 187 green, and §Failure modes' "key revoked | spool,
+// authFailures climbs, --status shouts" would silently stop being true.
+test("I-4: auth failures climb across consecutive failing runs and reset on the next success", async () => {
+  const store = freshStore("authfails");
+  const cfg = { apiKey: "k", apiUrl: "https://x/api/v1", enabled: true };
+  const rejected = async (_ctx, beats) => ({ tally: { sent: beats.length, accepted: 0 }, failed: beats, authFailed: true });
+  const accepted = async (_ctx, beats) => ({ tally: { sent: beats.length, accepted: beats.length }, failed: [], authFailed: false });
+
+  await runHook({ store, stdinText: fixture, cfg, now: 1_000, runGit: () => "", send: rejected });
+  expect(renderStatus({ store, cfg })).toContain("auth fails  1");
+
+  // Nothing fresh on stdin: the spool alone is enough to try again and climb.
+  await runHook({ store, stdinText: "", cfg, now: 2_000, send: rejected });
+  expect(renderStatus({ store, cfg })).toContain("auth fails  2");
+
+  await runHook({ store, stdinText: "", cfg, now: 3_000, send: accepted });
+  expect(renderStatus({ store, cfg })).toContain("auth fails  0");
+});
+
+// M-12 (Minor): README and spec word "never exits non-zero" absolutely, and
+// two of the three reachable non-zero exits were real: a JYL_WAKATIME_RUNTIME
+// that is executable but fails (measured: 3) and a checkout missing
+// src/wakatime/main.mjs (1). Both now exit 0 and leave a line in the tool's own
+// log, on the same terms as "no runtime on PATH". The third -- no `sh`
+// resolvable for the shebang -- cannot be caught from inside the script and is
+// named in the README instead.
+test("M-12: a JYL_WAKATIME_RUNTIME that is executable but not a runtime exits 0 and is diagnosed", () => {
+  const fakeHome = path.join(root, "m12-badruntime");
+  fs.mkdirSync(fakeHome, { recursive: true });
+  const launcher = path.join(import.meta.dir, "..", "scripts", "wakatime");
+
+  const result = spawnSync("sh", ["-c", `'${launcher}' --status`], {
+    env: { ...process.env, HOME: fakeHome, JYL_WAKATIME_RUNTIME: "/usr/bin/false" },
+    input: "",
+  });
+
+  expect(result.status).toBe(0);
+  const log = fs.readFileSync(path.join(fakeHome, ".config", "jyl-wakatime", "log"), "utf8");
+  expect(log).toContain("JYL_WAKATIME_RUNTIME exited 1; not reporting");
+});
+
+test("M-12: a checkout whose src/wakatime/main.mjs is missing exits 0 and is diagnosed", () => {
+  const fakeHome = path.join(root, "m12-noentry-home");
+  const brokenScripts = path.join(root, "m12-noentry", "scripts");
+  fs.mkdirSync(fakeHome, { recursive: true });
+  fs.mkdirSync(brokenScripts, { recursive: true });
+  // The same launcher bytes, in a tree that has no src/ beside it.
+  const copy = path.join(brokenScripts, "wakatime");
+  fs.copyFileSync(path.join(import.meta.dir, "..", "scripts", "wakatime"), copy);
+  fs.chmodSync(copy, 0o755);
+
+  const result = spawnSync("sh", ["-c", `'${copy}' --status`], {
+    env: { ...process.env, HOME: fakeHome },
+    input: "",
+  });
+
+  expect(result.status).toBe(0);
+  const log = fs.readFileSync(path.join(fakeHome, ".config", "jyl-wakatime", "log"), "utf8");
+  expect(log).toContain("entry point missing at");
+});
+
 // I3 fix-round-2 (re-review defect): scripts/wakatime's no-runtime-found
 // fallback log line and src/wakatime/cfg.mjs's STATE_DIR are computed in two
 // different languages, and nothing else notices if they drift apart -- fix

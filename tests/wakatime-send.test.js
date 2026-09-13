@@ -41,6 +41,12 @@ test("60 heartbeats go out as 25 / 25 / 10", async () => {
   expect(calls.map((c) => c.body.length)).toEqual([25, 25, 10]);
   expect(BATCH_SIZE).toBe(25);
   expect(res.tally.sent).toBe(60);
+  // Final review I-4: `tally.accepted` is one of the two numbers --status
+  // reports as "is it working", and deleting the line that produces it left
+  // all 187 tests green -- every healthy run would then render `accepted 0`,
+  // indistinguishable from the total-loss reading. `sent` counts what was
+  // attempted and cannot stand in for it.
+  expect(res.tally.accepted).toBe(60);
   expect(res.failed).toHaveLength(0);
 });
 
@@ -77,6 +83,70 @@ test("400 drops the batch — the same bytes will never be accepted", async () =
 
   expect(res.failed).toHaveLength(0);
   expect(res.tally.rejected).toBe(2);
+});
+
+// --- per-item verdicts inside an accepted bulk response (final review I-2) ---
+//
+// The wire shape below is not invented: Task 8 posted real heartbeats to
+// api.wakatime.com and recorded the reply (spec §5) -- `202 ACCEPTED` with
+// `{"responses": [[{"data": {"id": …}}, 201], …]}`, one `[body, status]` pair
+// per heartbeat. Reading only `res.ok`, as this file used to, counted a batch
+// WakaTime refused item by item as fully delivered: measured against a fake
+// service answering 202 + per-item 400, `--status` showed `spool 0, accepted 3,
+// failed 0`, no PROBLEM, and no log file at all.
+const bulk202 = (statuses) =>
+  new Response(
+    JSON.stringify({
+      responses: statuses.map((s) =>
+        s >= 200 && s < 300 ? [{ data: { id: `id-${s}` } }, s] : [{ errors: ["nope"] }, s],
+      ),
+    }),
+    { status: 202 },
+  );
+
+const logging = (responder) => {
+  const { ctx, calls } = ctxWith(responder);
+  const lines = [];
+  ctx.log = (line) => lines.push(line);
+  return { ctx, calls, lines };
+};
+
+test("per-item rejections inside a 202 are dropped and logged, never counted as accepted", async () => {
+  const { ctx, lines } = logging(() => bulk202([201, 400, 201]));
+  const res = await sendAll(ctx, beats(3));
+
+  expect(res.tally.accepted).toBe(2);
+  expect(res.tally.rejected).toBe(1);
+  expect(res.failed).toHaveLength(0); // the same bytes would be refused again
+  expect(lines.join("\n")).toContain("wakatime rejected 1 of 3 heartbeat(s) individually, dropping: 400 x1");
+});
+
+test("a per-item transient code is owed back to the spool; a per-item 401 is an auth failure", async () => {
+  const { ctx, lines } = logging(() => bulk202([500, 401, 201]));
+  const res = await sendAll(ctx, beats(3));
+
+  expect(res.tally.accepted).toBe(1);
+  expect(res.tally.rejected).toBe(0);
+  // Positional, not "the first N": entries line up with the heartbeats as sent.
+  expect(res.failed.map((b) => b.entity)).toEqual(["/f0.go", "/f1.go"]);
+  expect(res.authFailed).toBe(true);
+  expect(lines.join("\n")).toContain("deferred 2 of 3 heartbeat(s) individually (will retry): 500 x1, 401 x1");
+});
+
+test("a 202 that carries no per-item verdict is read as accepted, not as lost", async () => {
+  // A self-hosted wakapi/hakatime answering `{}`, a body that is not JSON at
+  // all, and an empty `responses` array all mean "nothing said about any item".
+  // Reading silence as failure would spool every heartbeat such a server
+  // accepted, forever.
+  for (const body of ["{}", "not json at all", JSON.stringify({ responses: [] })]) {
+    const { ctx, lines } = logging(() => new Response(body, { status: 202 }));
+    const res = await sendAll(ctx, beats(3));
+
+    expect(res.tally.accepted).toBe(3);
+    expect(res.tally.rejected).toBe(0);
+    expect(res.failed).toHaveLength(0);
+    expect(lines).toHaveLength(0);
+  }
 });
 
 const UA_ARGS = {
@@ -169,4 +239,37 @@ test("the two characters that would shift or split the slot are neutralised", ()
 
   expect(aiModelToken(undefined)).toBe("");
   expect(aiModelToken("")).toBe("");
+});
+
+// Final review M-13. A model id comes straight from the user's own
+// config.toml, so a non-ASCII one is reachable -- and it is not a cosmetic
+// problem: `fetch` refuses any header value holding a codepoint above U+00FF,
+// which `postBatch` catches as a *network* error, so every heartbeat goes back
+// to the spool on every run, forever, with nothing naming the cause. The
+// runtimes disagree only on the message (bun: "Header 'User-Agent' has invalid
+// value"; node: "Cannot convert argument to a ByteString..."), not on the
+// throw. Reporting no model is a clean parse (probe P12: `ai_model: null`).
+test("a model name the User-Agent cannot carry reports no model, rather than breaking every send", () => {
+  expect(aiModelToken("模型-5")).toBe("");
+  expect(aiModelToken("claude-模型")).toBe("");
+  expect(aiModelToken("模型")).toBe("");
+  // latin1 would survive the header layer, but a name whose reading depends on
+  // the server's decoding is not the stable bucket name this token exists to
+  // be. Printable ASCII or nothing.
+  expect(aiModelToken("café-5")).toBe("");
+  // A control character is not `\s`, so it survives the whitespace collapse --
+  // and would break the header just as surely.
+  expect(aiModelToken("gpt\u0001-5")).toBe("");
+  // Ordinary ASCII punctuation a gateway might use is untouched.
+  expect(aiModelToken("qwen:7b")).toBe("qwen:7b");
+
+  const noModel = "wakatime/1.0.0 (darwin-27.0.0-arm64) go0.0.0 harness/27.0.17 harness-wakatime/0.1.0";
+  expect(userAgent({ ...UA_ARGS, model: "模型-5" })).toBe(noModel);
+
+  // The invariant that matters, asserted against the same layer that enforces
+  // it in production: whatever the model is, the User-Agent must be a header.
+  expect(() => new Headers({ "User-Agent": "模型-5" })).toThrow(); // the hazard is real
+  for (const model of ["模型-5", "claude-opus-5", "café-5", "anthropic/claude opus 5", "gpt\u0001-5"]) {
+    expect(() => new Headers({ "User-Agent": userAgent({ ...UA_ARGS, model }) })).not.toThrow();
+  }
 });

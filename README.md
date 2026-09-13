@@ -446,6 +446,16 @@ api url:  WAKATIME_API_URL
        -> https://api.wakatime.com/api/v1
 ```
 
+**`~/.config/jyl-wakatime` always means `$HOME/.config/jyl-wakatime`, literally.**
+This tool does not honour `$XDG_CONFIG_HOME` — that is the existing
+convention in this repo (`jyl-usage`'s own state directories are the same
+kind of hardcoded path), not something decided fresh here. If that ever
+changes, it has to change in exactly one place
+(`STATE_DIR`/`JSON_CONFIG_FILE` in `src/wakatime/cfg.mjs`) and the
+`scripts/wakatime` fallback that mirrors it for when no runtime is on `PATH`
+(see "Is it working?" below) has to move with it — the two are not allowed
+to drift, since nothing else would notice if they did.
+
 **`~/.wakatime.cfg` is checked before this tool's own config, deliberately:**
 anyone who has ever installed a WakaTime editor plugin already has a key
 there, and asking for a second copy of the same secret would be asking for

@@ -20,6 +20,14 @@ import path from "node:path";
 export const DEFAULT_API_URL = "https://api.wakatime.com/api/v1";
 export const WAKA_CFG_FILE = path.join(os.homedir(), ".wakatime.cfg");
 export const JSON_CONFIG_FILE = path.join(os.homedir(), ".config", "jyl-wakatime", "config.json");
+// This is the single source of truth for where this tool's state lives.
+// `scripts/wakatime` recomputes this exact path in shell (`$HOME/.config/jyl-wakatime`)
+// for the one case this module can't run at all -- no bun or no node on
+// PATH -- so it can still leave a trace of that failure. Deliberately not
+// XDG_CONFIG_HOME-aware: os.homedir() never reads it either, and the shell
+// fallback has to match this constant byte-for-byte or its log line lands
+// somewhere `--status` never looks (see scripts/wakatime's own comment on
+// the same line). Move both together if this ever changes.
 export const STATE_DIR = path.join(os.homedir(), ".config", "jyl-wakatime");
 
 /** Parse the `[settings]` section of a wakatime.cfg. Never throws. */

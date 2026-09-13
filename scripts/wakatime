@@ -57,7 +57,15 @@ fi
 # silent, undiagnosable failure: --status run from a shell that *does* have
 # bun on PATH looks perfectly healthy. Best-effort: a read-only $HOME must
 # not turn "no runtime" into a non-zero exit.
-LOGDIR="${XDG_CONFIG_HOME:-$HOME/.config}/jyl-wakatime"
+#
+# This path MUST stay byte-for-byte in sync with STATE_DIR in
+# src/wakatime/cfg.mjs -- that JS constant is the single source of truth for
+# where this tool's state lives, and this shell line only exists because the
+# JS never got to run. It deliberately does NOT read $XDG_CONFIG_HOME:
+# os.homedir() in cfg.mjs never does either, so a shell computation that did
+# would silently write this fallback line to a directory --status never
+# reads. If STATE_DIR ever becomes XDG-aware, this line has to move with it.
+LOGDIR="$HOME/.config/jyl-wakatime"
 mkdir -p "$LOGDIR" 2>/dev/null || true
 printf '%s jyl-wakatime: no bun or node on PATH; not reporting\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >>"$LOGDIR/log" 2>/dev/null || true
 echo "jyl-wakatime: no bun or node on PATH; not reporting. Set JYL_WAKATIME_RUNTIME to an absolute path to override." >&2

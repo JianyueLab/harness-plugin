@@ -480,3 +480,48 @@ test("M5: --flush discards stdin and only drains the pre-existing spool", async 
   expect(sentBatches[0].entity).toBe("/old.go");
   expect(store.readSpool()).toHaveLength(0); // drained: send() accepted it
 });
+
+// I3 fix-round-2 (re-review defect): scripts/wakatime's no-runtime-found
+// fallback log line and src/wakatime/cfg.mjs's STATE_DIR are computed in two
+// different languages, and nothing else notices if they drift apart -- fix
+// round 1 introduced exactly that drift by reading $XDG_CONFIG_HOME in the
+// shell only. This asserts against the *real* STATE_DIR (read back from
+// cfg.mjs itself, in a fresh process under the fake HOME -- not a path
+// re-typed by hand in this file, which would just be the same mistake
+// twice), not a hardcoded string, so a future change to either side shows up
+// here. Run with XDG_CONFIG_HOME both unset and set, because the regression
+// this guards against only appeared once it was set.
+const cfgModulePath = path.join(import.meta.dir, "..", "src", "wakatime", "cfg.mjs");
+const probeScript = path.join(root, "probe-state-dir.mjs");
+fs.writeFileSync(probeScript, `import { STATE_DIR } from ${JSON.stringify(cfgModulePath)};\nconsole.log(STATE_DIR);\n`);
+
+for (const xdg of [undefined, "elsewhere/xdgconf"]) {
+  const label = xdg === undefined ? "XDG_CONFIG_HOME unset" : "XDG_CONFIG_HOME set to something else";
+  test(`I3 fix-round-2: launcher's no-runtime log lands in cfg.mjs's own STATE_DIR (${label})`, () => {
+    const fakeHome = path.join(root, `i3-drift-${xdg === undefined ? "noxdg" : "xdg"}`);
+    fs.mkdirSync(fakeHome, { recursive: true });
+    const envExtra = xdg === undefined ? {} : { XDG_CONFIG_HOME: path.join(fakeHome, xdg) };
+
+    // The canonical log file, read from the real module under this exact
+    // HOME/XDG_CONFIG_HOME combination -- this is what "in sync" means.
+    const probe = spawnSync(process.execPath, [probeScript], {
+      env: { ...process.env, HOME: fakeHome, ...envExtra },
+    });
+    expect(probe.status).toBe(0);
+    const stateDir = probe.stdout.toString().trim();
+    expect(stateDir.length).toBeGreaterThan(0);
+    const expectedLogFile = createStore(stateDir).logFile;
+
+    // Run the launcher with neither bun nor node reachable, so it must take
+    // the no-runtime fallback path this test exists to check.
+    const launcher = path.join(import.meta.dir, "..", "scripts", "wakatime");
+    const result = spawnSync("sh", ["-c", `'${launcher}'`], {
+      env: { ...process.env, HOME: fakeHome, PATH: "/usr/bin:/bin", JYL_WAKATIME_RUNTIME: "", ...envExtra },
+      input: "",
+    });
+
+    expect(result.status).toBe(0);
+    expect(fs.existsSync(expectedLogFile)).toBe(true);
+    expect(fs.readFileSync(expectedLogFile, "utf8")).toContain("no bun or node on PATH; not reporting");
+  });
+}

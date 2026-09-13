@@ -166,15 +166,35 @@ const VAULT_CMD_TIMEOUT_MS = 5_000;
 /**
  * Expand a leading `~/` (or a bare `~`) to the user's home directory in one
  * argv token. Writing a `~`-relative path in a config file is completely
- * ordinary, and it is the one shell behaviour real `api_key_vault_cmd`
- * values are likely to lean on even though nothing else in this string is
- * shell-interpreted -- without this, such a value failed with a bare ENOENT
- * indistinguishable from "no key configured" (see `classifyVaultFailure`
- * and README's Configure section). Deliberately narrow: only a leading `~`
- * or `~/`, never `~otheruser` -- a real but rare shell feature that would
- * need a passwd lookup this module has no other reason to perform.
+ * ordinary, and real `api_key_vault_cmd` values are likely to lean on it
+ * even though nothing else in this string is shell-interpreted -- without
+ * this, such a value failed with a bare ENOENT indistinguishable from "no
+ * key configured" (see `classifyVaultFailure` and README's Configure
+ * section). Deliberately narrow: only a leading `~` or `~/`, never
+ * `~otheruser` -- a real but rare shell feature that would need a passwd
+ * lookup this module has no other reason to perform.
+ *
+ * **This is this tool's own addition, not something copied from
+ * `wakatime-cli`.** Splitting the command into words at all mirrors
+ * `wakatime-cli`'s approach; expanding `~` inside one of those words does
+ * not, and README/spec text describing this must say so, not lump it in
+ * with "the same way wakatime-cli splits this value."
+ *
+ * Also not shell-faithful, and deliberately so: a real shell tracks which
+ * characters were quoted and skips tilde expansion for a quoted or escaped
+ * `~` (`"~"`, `'~'`, `\~` all stay literal). This tokenizer discards that
+ * information during quote removal in `splitVaultCmd` -- by the time a
+ * token reaches this function, `"~"` and `~` are the same string -- so
+ * every leading `~` expands regardless of how it was written. Teaching this
+ * one character shell-accurate quoting, while every other character in this
+ * value is already knowingly *not* shell (no pipes, no `$VAR`, no `;`),
+ * would buy one narrow case at the cost of making the whole scheme harder
+ * to describe, for a need nothing so far has shown. The consequence is
+ * real, not hypothetical, and documented in the README: **there is no way
+ * to put a literal `~` in this command's arguments.**
  */
 export function expandTilde(token) {
+  if (typeof token !== "string") return token; // never the shape splitVaultCmd produces, but this is exported -- never throw on a caller's mistake either
   if (token === "~") return os.homedir();
   if (token.startsWith("~/")) return path.join(os.homedir(), token.slice(2));
   return token;
@@ -190,15 +210,34 @@ export function expandTilde(token) {
  * could be appended after it is exactly what `stdio: [..., "ignore"]` below
  * exists to keep unread. Neither may leak back in through the error path.
  *
- * `err.code === "ETIMEDOUT"`, not `err.killed`, is the timeout signal --
- * verified directly against both runtimes (Node and Bun agree): a child
- * killed by `execFileSync`'s own `timeout` option leaves `err.killed`
- * `undefined`, not `true`, on this Node/Bun version pair. Trusting `killed`
- * here would have silently never matched.
+ * Every branch returns the same `"api_key_vault_cmd: <reason>"` shape --
+ * fix round 2 unified this after the two vault-code-path branches here and
+ * the plain-string branches in `execVaultCmd`/`loadWakaConfig` below had
+ * drifted to inconsistent prefixes (`"api_key_vault_cmd: X"` in some places,
+ * `"api_key_vault_cmd X"` in others).
+ *
+ * Order matters, and is deliberate:
+ *
+ * - `err.code === "ETIMEDOUT"`, not `err.killed`, is the timeout signal --
+ *   verified directly against both runtimes (Node and Bun agree): a child
+ *   killed by `execFileSync`'s own `timeout` option leaves `err.killed`
+ *   `undefined`, not `true`, on this Node/Bun version pair. Trusting
+ *   `killed` here would have silently never matched. It must also be
+ *   checked before `err.status`: a timed-out child can carry a non-null
+ *   numeric `err.status` from however it happened to die, which would
+ *   otherwise misreport a timeout as an ordinary exit code.
+ * - `err.code === "ENOBUFS"` (stdout exceeded `execFileSync`'s `maxBuffer`)
+ *   is checked before the generic `err.signal` fallback for the same
+ *   reason: the child is killed with `SIGKILL` to enforce the buffer limit,
+ *   same as a timeout kill, so without this check it would misreport as
+ *   `"killed by SIGKILL"` -- true but pointing at the wrong problem. "The
+ *   command hung" and "the command's output was too large" call for
+ *   different fixes.
  */
 function classifyVaultFailure(err) {
   if (err?.code === "ENOENT") return "api_key_vault_cmd: command not found";
   if (err?.code === "ETIMEDOUT") return "api_key_vault_cmd: timed out";
+  if (err?.code === "ENOBUFS") return "api_key_vault_cmd: output too large";
   if (typeof err?.status === "number") return `api_key_vault_cmd: exited ${err.status}`;
   if (err?.signal) return `api_key_vault_cmd: killed by ${err.signal}`;
   return "api_key_vault_cmd: failed to run";
@@ -227,10 +266,23 @@ function classifyVaultFailure(err) {
  * otherwise simply be waited on past `timeoutMs` for as long as it runs,
  * turning "bounded" into "usually bounded." `SIGKILL` cannot be trapped, so
  * the timeout is an actual ceiling, not a polite request.
+ *
+ * **This only bounds the direct child, not anything it forks.** A vault
+ * command that itself launches a background helper and exits (or that
+ * execs a shell which backgrounds a grandchild) can leave that grandchild
+ * running past the timeout -- `SIGKILL` on the direct child does not reach
+ * process descendants Node/Bun didn't spawn. Not fixed here, on the same
+ * reasoning harness's own hook runner already commits to for its own
+ * `exec.CommandContext` (`harness/hook/runner.go`, `Runner.exec`): killing
+ * a whole process group would risk taking out a legitimately-detached
+ * worker along with a hung one, and `--detach`-style tools are the
+ * documented way this class of tool is expected to behave. A vault CLI
+ * backgrounding a helper process is not that pattern, so this is a known,
+ * accepted gap, not a silent one.
  */
 export function execVaultCmd(command, { timeoutMs = VAULT_CMD_TIMEOUT_MS } = {}) {
   const argv = splitVaultCmd(command).map(expandTilde);
-  if (argv.length === 0) return { key: "", problem: "api_key_vault_cmd is empty" };
+  if (argv.length === 0) return { key: "", problem: "api_key_vault_cmd: empty" };
   try {
     const out = execFileSync(argv[0], argv.slice(1), {
       encoding: "utf8",
@@ -239,7 +291,7 @@ export function execVaultCmd(command, { timeoutMs = VAULT_CMD_TIMEOUT_MS } = {})
       stdio: ["ignore", "pipe", "ignore"],
     });
     const key = out.trim();
-    return key ? { key, problem: null } : { key: "", problem: "api_key_vault_cmd produced no output" };
+    return key ? { key, problem: null } : { key: "", problem: "api_key_vault_cmd: produced no output" };
   } catch (err) {
     return { key: "", problem: classifyVaultFailure(err) };
   }
@@ -266,7 +318,7 @@ export function loadWakaConfig({
     // runner has no structured failure to classify, so it gets the same
     // generic diagnosis a broken test double deserves -- never `err.message`,
     // for the same reason execVaultCmd's own classifier avoids it.
-    let result = { key: "", problem: "api_key_vault_cmd runner failed unexpectedly" };
+    let result = { key: "", problem: "api_key_vault_cmd: runner failed unexpectedly" };
     try {
       result = runVaultCmd(cfg.api_key_vault_cmd) ?? result;
     } catch {
@@ -282,7 +334,7 @@ export function loadWakaConfig({
       // command, not the file directly."
       source = "api_key_vault_cmd";
     } else {
-      vaultCmdProblem = result.problem ?? "api_key_vault_cmd produced no key";
+      vaultCmdProblem = result.problem ?? "api_key_vault_cmd: produced no key";
     }
   }
   if (!apiKey && json.apiKey) { apiKey = String(json.apiKey).trim(); source = jsonPath; }

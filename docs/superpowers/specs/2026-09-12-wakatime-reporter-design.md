@@ -201,17 +201,34 @@ in `/` is trimmed; the tool posts to `<api_url>/users/current/heartbeats.bulk`.
 
 `[settings] api_key_vault_cmd` is `wakatime-cli`'s own escape hatch for a key
 kept in a password manager: run the named command, treat its trimmed stdout
-as the key. Split into argv like a shell would (quotes, backslash escapes, a
-leading `~/` or bare `~` expanded to `$HOME`), but never handed to an actual
-shell — no pipes, no `$VAR` expansion, no `;` chaining. `api_key` wins if
-both are present; the command never runs in that case. A failing command
-(not found, non-zero exit, timed out, empty output) never yields a key and
-never throws, but is diagnosed distinctly from "no key configured at all" —
-see the failure table below — without ever logging the command or its
-output. The 5s timeout on the command is sized against harness's own 10s
-hook timeout (`DefaultHookTimeoutSeconds`), not picked independently: it has
-to fire, log, and return well before harness would kill an undetached hook
-process out from under it.
+as the key. Split into argv the way `wakatime-cli` itself splits this value
+(quotes, backslash escapes), but never handed to an actual shell — no
+pipes, no `$VAR` expansion, no `;` chaining. `api_key` wins if both are
+present; the command never runs in that case.
+
+**A leading `~/` or bare `~` is expanded to `$HOME` — this tool's own
+addition, not part of `wakatime-cli`'s own splitting.** Not shell-faithful:
+quoting or escaping a `~` (`"~"`, `'~'`, `\~`) does not suppress the
+expansion the way it would in a real shell, because quote information is
+discarded during tokenising, before this step runs — so there is no way to
+write a literal `~` into an argument. Deliberate: matching shell-accurate
+quoting for one character while the rest of this value is already knowingly
+not shell wasn't worth it for a case nothing has needed.
+
+A failing command (not found, non-zero exit, timed out, output past
+`execFileSync`'s `maxBuffer`, empty output) never yields a key and never
+throws, but is diagnosed distinctly from "no key configured at all" — see
+the failure table below — without ever logging the command or its output.
+The 5s timeout on the command is sized against harness's own 10s hook
+timeout (`DefaultHookTimeoutSeconds`), not picked independently: it has to
+fire, log, and return well before harness would kill an undetached hook
+process out from under it. The command is killed with `SIGKILL`, not asked
+via `SIGTERM`, so a child that traps signals still can't outlast the
+timeout — but this only reaches the command's own process, not anything it
+may have forked off before exiting, the same limitation harness's own hook
+runner accepts for the same reason (`hook/runner.go`: killing a whole
+process group would risk taking a legitimately-detached worker down with a
+hung one).
 
 The cfg file is INI. Parse only `[settings]`, only the four keys named just
 above — `api_key`, `api_key_vault_cmd`, `api_url`, `hide_file_names` — and
@@ -380,7 +397,7 @@ jyl-wakatime 0.1.0
 | What happened | What the tool does |
 |---|---|
 | no key anywhere | log once, exit 0, `--status` says "no API key configured" |
-| `api_key_vault_cmd` configured but fails (not found / non-zero exit / timed out / empty output) | log once, exit 0 — but `--status` says which of those it was, not the generic "no API key configured", and never the command or its output |
+| `api_key_vault_cmd` configured but fails (not found / non-zero exit / timed out / output too large / empty output) | log once, exit 0 — but `--status` says which of those it was, not the generic "no API key configured", and never the command or its output |
 | stdin is not valid JSON | log, exit 0 |
 | payload's `event` is not `RunEnd` | log, exit 0 — forward compatibility with a harness that grows more events |
 | WakaTime down | spool, retry next turn |

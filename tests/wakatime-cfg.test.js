@@ -196,6 +196,34 @@ test("expandTilde: a leading ~ or ~/ resolves against the real home directory, n
   expect(expandTilde("~otheruser/bin")).toBe("~otheruser/bin");
 });
 
+// Fix round 2 / D-3: expandTilde is exported, and this file's rule is
+// "never throws" for everything in it -- an exported helper is not exempt
+// just because splitVaultCmd never actually hands it a non-string.
+// Reproduced before the fix: expandTilde(123) threw
+// "token.startsWith is not a function".
+test("D-3: expandTilde never throws on a non-string, returns it unchanged", () => {
+  expect(() => expandTilde(123)).not.toThrow();
+  expect(expandTilde(123)).toBe(123);
+  expect(expandTilde(null)).toBeNull();
+  expect(expandTilde(undefined)).toBeUndefined();
+  expect(expandTilde(["~"])).toEqual(["~"]);
+});
+
+// Fix round 2 / D-2: quoting or escaping a `~` does NOT suppress expansion
+// the way it would in a real shell -- splitVaultCmd's quote removal already
+// happened by the time expandTilde sees the token, so `"~"`, `'~'`, and
+// `\~` are indistinguishable from a bare `~`. Documented as a deliberate
+// limitation (not "shell-faithful" on this one point), not a bug: there is
+// no escape sequence that survives to produce a literal `~` in an argument.
+test("D-2: quoting or escaping a ~ does not suppress expansion -- there is no way to get a literal ~", () => {
+  const home = os.homedir();
+  const expand = (cmd) => splitVaultCmd(cmd).map(expandTilde);
+  expect(expand("~")).toEqual([home]); // the ordinary unquoted case, for contrast
+  expect(expand('"~"')).toEqual([home]);
+  expect(expand("'~'")).toEqual([home]);
+  expect(expand("\~")).toEqual([home]);
+});
+
 test("execVaultCmd returns { key, problem: null } on success, from a real (fake) command", () => {
   const script = writeScript("vault-ok.sh", 'echo "  fake-vault-token-abc123  "');
   expect(execVaultCmd(script)).toEqual({ key: "fake-vault-token-abc123", problem: null });
@@ -214,11 +242,22 @@ test("execVaultCmd classifies a non-zero exit distinctly, and never surfaces std
 
 test("execVaultCmd classifies empty stdout distinctly from a hard failure", () => {
   const script = writeScript("vault-empty.sh", "true");
-  expect(execVaultCmd(script)).toEqual({ key: "", problem: "api_key_vault_cmd produced no output" });
+  expect(execVaultCmd(script)).toEqual({ key: "", problem: "api_key_vault_cmd: produced no output" });
 });
 
 test("execVaultCmd classifies an empty command string distinctly", () => {
-  expect(execVaultCmd("   ")).toEqual({ key: "", problem: "api_key_vault_cmd is empty" });
+  expect(execVaultCmd("   ")).toEqual({ key: "", problem: "api_key_vault_cmd: empty" });
+});
+
+// Fix round 2: a maxBuffer overflow is killed with SIGKILL just like a
+// timeout, so without its own check it fell into classifyVaultFailure's
+// generic `err.signal` branch and reported "killed by SIGKILL" -- true, but
+// pointing at the wrong problem ("the command hung" vs. "the command's
+// output was too large" call for different fixes). Reproduced before the
+// fix: this exact script classified as "killed by SIGKILL".
+test("execVaultCmd classifies output exceeding maxBuffer as too-large, not a generic SIGKILL", () => {
+  const script = writeScript("vault-huge-output.sh", "yes A | head -c 2000000");
+  expect(execVaultCmd(script)).toEqual({ key: "", problem: "api_key_vault_cmd: output too large" });
 });
 
 test("execVaultCmd bounds a hanging command with its timeout, never hangs the caller", () => {
@@ -387,7 +426,7 @@ test("loadWakaConfig: a vault command that throws, with no json fallback, gets t
   };
   const got = loadWakaConfig({ env: {}, cfgPath, jsonPath: "/nope", runVaultCmd });
   expect(got.apiKey).toBe("");
-  expect(configProblem(got)).toBe("api_key_vault_cmd runner failed unexpectedly");
+  expect(configProblem(got)).toBe("api_key_vault_cmd: runner failed unexpectedly");
 });
 
 test("loadWakaConfig: no cfg.api_key, no vault command at all, no json -> the plain generic problem", () => {
@@ -424,14 +463,14 @@ test("loadWakaConfig + configProblem: a vault command with empty output is diagn
   const script = writeScript("vault-diag-empty.sh", "true");
   const cfgPath = writeFile("vault-diag-empty.cfg", `[settings]\napi_key_vault_cmd = ${script}\n`);
   const got = loadWakaConfig({ env: {}, cfgPath, jsonPath: "/nope" });
-  expect(configProblem(got)).toBe("api_key_vault_cmd produced no output");
+  expect(configProblem(got)).toBe("api_key_vault_cmd: produced no output");
 });
 
 // Not a distinct diagnosis: parseWakaCfg's own `.trim()` collapses a
 // whitespace-only value to `""`, which is falsy, so loadWakaConfig never
 // even calls the vault runner for it -- it reads exactly like the key being
 // absent from the file altogether, same as today. execVaultCmd's own
-// "api_key_vault_cmd is empty" classification (tested directly above) only
+// "api_key_vault_cmd: empty" classification (tested directly above) only
 // fires for a caller that hands it a non-empty-but-all-whitespace string
 // directly; through a real cfg file, that string never survives parsing.
 test("loadWakaConfig: a whitespace-only api_key_vault_cmd value in the file is the same as it being absent", () => {

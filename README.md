@@ -470,22 +470,36 @@ this tool has never heard of will not break it.
 plaintext** — the same option `wakatime-cli` itself supports, so an existing
 editor plugin's config Just Works here too. Its value is a command; **this
 tool runs it and treats whatever it prints on stdout, trimmed, as the key.**
-It is split into a command and arguments the same way `wakatime-cli` itself
-splits this value (quotes and backslash escapes are understood, and a
-leading `~/` or bare `~` is expanded to your home directory — writing a
-path with `~` in it is fine), but nothing else is interpreted: no pipes, no
-`$VAR` expansion, no `;` chaining, no `` ` `` or `$(...)` substitution — it
-is never handed to an actual shell. If both `api_key` and
-`api_key_vault_cmd` are present, `api_key` wins and the command never runs.
+Splitting that value into a command and arguments mirrors `wakatime-cli`'s
+own approach (quotes and backslash escapes are understood), but nothing
+else is interpreted: no pipes, no `$VAR` expansion, no `;` chaining, no
+`` ` `` or `$(...)` substitution — it is never handed to an actual shell. If
+both `api_key` and `api_key_vault_cmd` are present, `api_key` wins and the
+command never runs.
+
+**Expanding a leading `~/` or bare `~` to your home directory is this
+tool's own addition, not part of `wakatime-cli`'s behaviour** — real config
+values commonly need it, and without it such a value simply failed to find
+the command at all. It is not shell-faithful, though, and deliberately so:
+a real shell skips tilde expansion for a quoted or escaped `~`, but this
+splitter doesn't track which characters were quoted, so `"~"`, `'~'`, and
+`\~` all expand exactly like a bare `~`. The consequence is real: **there
+is no way to put a literal `~` in this command's arguments.** Teaching this
+one character shell-accurate quoting, when every other character in this
+value is already knowingly not shell, wasn't worth it for a case nothing
+has needed.
 
 The command gets 5 seconds — sized against harness's own 10-second default
 hook timeout mentioned above, with headroom to spare, so this tool's own
 timeout fires and gets logged well before harness would kill an undetached
-hook process out from under it. If the command is missing, exits non-zero,
-times out, or prints nothing at all, it never yields a key and never
-crashes — but unlike an outright absent config, `--status` and the log say
-*which* of those happened (`api_key_vault_cmd: command not found`,
-`: exited 9`, `: timed out`, or `produced no output`), so it doesn't read
+hook process out from under it (a hung command is killed outright, not
+asked nicely — but only the command itself, not anything it may have
+forked off in the meantime). If the command is missing, exits non-zero,
+times out, produces too much output, or prints nothing at all, it never
+yields a key and never crashes — but unlike an outright absent config,
+`--status` and the log say *which* of those happened
+(`api_key_vault_cmd: command not found`, `: exited 9`, `: timed out`,
+`: output too large`, or `: produced no output`), so it doesn't read
 identically to "you never configured a key." What is never logged, on any
 of those paths, is the command itself or anything it printed: a failing
 vault command's stderr is exactly the kind of place a key, a passphrase

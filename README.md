@@ -43,7 +43,7 @@ subscription for `agy` — and counting them against the portal's monthly limit
 would charge them twice. They show up in every report and in the leaderboard,
 and the limit stays gateway-only.
 
-## Install (Claude Code)
+### Install (Claude Code)
 
 ```sh
 /plugin marketplace add JianyueLab/claude-plugin
@@ -54,7 +54,7 @@ Requires `bun` or `node` on `PATH` (set `JYL_USAGE_RUNTIME` to an absolute path
 if neither resolves inside Claude Code's environment). There is nothing to
 build: the plugin is the source.
 
-## Install (Antigravity CLI)
+### Install (Antigravity CLI)
 
 Same repository, no separate checkout: the two manifests sit side by side at
 the root (`.claude-plugin/plugin.json` for Claude Code, `plugin.json` for
@@ -98,7 +98,7 @@ specifically for reading `agy`'s conversation databases — one of `bun`'s
 built-in SQLite, Node's `node:sqlite` (22.5+), or the `sqlite3` binary.
 `./scripts/run --host antigravity --status` says which one it found.
 
-## Configure
+### Configure
 
 Two values: the portal **origin** and a portal API key (`jyl-…`, from the
 portal's *API keys* page). Either export them —
@@ -141,7 +141,7 @@ Optional keys in the config file:
 **Until it is configured the plugin does nothing at all**, silently. An install
 without a key is inert, not noisy.
 
-## Use
+### Use
 
 Day to day there is nothing to run on either host — the hooks do the work.
 When you do want to check in:
@@ -176,7 +176,7 @@ to stay correct if Antigravity surfaces that converted copy too — it resolves
 the script's path itself when `${CLAUDE_PLUGIN_ROOT}` is unset (which it will
 be there) and says to add `--host antigravity`.
 
-## How it works
+### How it works
 
 ```
 Claude Code turn ends
@@ -193,7 +193,7 @@ the spool and runs the catch-up sweep, so usage from a session that ended while
 the portal was down — or that ended without a last hook at all — is sent by
 whichever session next fires one.
 
-## How it works (agy)
+### How it works (agy)
 
 ```
 agy turn ends
@@ -214,7 +214,7 @@ hook's own, and replies `{}` in milliseconds so the agent loop never waits on
 a slow read, a held lock, or a slow portal. The catch-up sweep covers what a
 missed `Stop` would otherwise strand, same as on Claude Code.
 
-## State
+### State
 
 State lives per host — `~/.claude/jyl-usage/` for Claude Code,
 `~/.gemini/jyl-usage/` for the Antigravity CLI — each holding the same five
@@ -230,7 +230,7 @@ the dedup window, not the spool.
 | `log` | What happened, capped at 256 KB. |
 | `lock` | Serialises concurrent sessions; stale after 60 s. |
 
-### Things worth knowing
+#### Things worth knowing
 
 **Reporting Antigravity usage needs a portal change that has not shipped
 yet.** The portal's ingest route only accepts a fixed list of `source`
@@ -308,7 +308,7 @@ carry only a cache-creation total are attributed to the cheaper 5-minute bucket.
 This is Claude-specific pricing; Gemini's implicit caching has no separately
 priced write, so Antigravity events always carry `0` in both write buckets.
 
-## Portal side
+### Portal side
 
 `POST /v1/usage/ingest`, authenticated with a portal key as
 `Authorization: Bearer` or `x-api-key`, like every other `/v1` route. Same
@@ -366,13 +366,22 @@ harness RunEnd hook (stdin, one JSON line per finished run)
 ```
 
 **What it sends off this machine — stated here, not in a footnote below the
-install instructions:** absolute file paths, the git project name and
-branch, a best-effort programming-language guess from the file extension,
-input and output token counts, the prompt length in characters, and a
-session id it makes up for the run. **It never sends** prompts, completions,
-file contents, tool arguments, command lines, or tool results — harness's
-`RunEnd` payload does not carry any of those to begin with, so this is
-enforced upstream, not by this tool's restraint.
+install instructions:** absolute file paths, each touched file's timestamp
+and whether the tool call that touched it was a write or a read
+(`is_write`), the git project name and branch, a best-effort
+programming-language guess from the file extension, input and output token
+counts, the prompt length in characters, and the session id — **not
+one this tool invents per run**, but the id harness generates once for its
+own process and stamps into every run's payload, so it is a single value
+shared by everything that process reports, not a fresh one per run. The
+request itself also carries a User-Agent identifying this tool, harness, and
+the machine, e.g.
+`wakatime/1.0.0 (darwin-27.0.0-arm64) harness/27.0.17 harness-wakatime/0.1.0`
+— OS, kernel release, CPU architecture, harness's version and this tool's
+own. **It never sends** prompts, completions, file contents, tool arguments,
+command lines, or tool results — harness's `RunEnd` payload does not carry
+any of those to begin with, so this is enforced upstream, not by this tool's
+restraint.
 
 One caveat about those token counts: when a run's `outcome` is `"cancelled"`
 or `"error"` instead of `"ok"`, harness may not have finished accumulating
@@ -387,7 +396,24 @@ that did not end `"ok"`.
 
 ### Install: wire it into harness
 
-Add a hook in harness's `config.toml`:
+**Step 0, before the hook config: get a checkout and a key.** Unlike
+`jyl-usage`'s Claude Code route above, there is no marketplace install here —
+harness's `command` needs a real absolute path, so clone or copy this repo
+somewhere that will not move (`git submodule update` detaching HEAD, or the
+directory getting renamed, both break the path silently). The launcher also
+needs `bun` or `node` on `PATH` at the moment harness execs it — set
+`JYL_WAKATIME_RUNTIME` to an absolute interpreter path if neither resolves in
+harness's environment (harness inherits its own full environment into the
+hook, so this is usually the same `PATH` your shell has). If no runtime is
+found, `scripts/wakatime` writes a line to stderr *and*, since harness
+discards a hook's stderr and never runs `--status` for you, to
+`~/.config/jyl-wakatime/log` — the one thing that keeps this specific failure
+from being completely invisible (see "Is it working?" below). And the API
+key itself comes from WakaTime, not this repo: your account's [API key
+settings page](https://wakatime.com/settings/account#apikey), or the
+equivalent settings page on your self-hosted wakapi/hakatime instance.
+
+Then add a hook in harness's `config.toml`:
 
 ```toml
 [[hooks]]
@@ -477,13 +503,18 @@ reports what the most recent attempt actually did — for example:
 | Line | What it means |
 |---|---|
 | `PROBLEM` | present at all → nothing is being sent right now; its text says why |
-| `spool` | heartbeats read but not yet accepted by WakaTime; should trend toward 0 across runs, not up. Capped at 5000 — past that, the oldest are dropped, logged as `spool overflow: dropped N oldest events` |
+| `spool` | heartbeats that failed on their most recent send attempt — a network error, a 429, a 5xx, or a 401/403 all land here — waiting for the next retry, either the next hook run or `--flush` (below). Should trend toward 0 across runs, not up. Capped at 5000 — past that, the oldest are dropped, logged as `spool overflow: dropped N oldest events` |
 | `last send` | `accepted N, failed M` from the most recent attempt; `failed` staying above 0 across several runs means something is wrong, not a fluke |
-| `auth fails` | counts *consecutive* attempts rejected with 401/403; one attempt that is not rejected that way resets it to 0. Nonzero means the key WakaTime saw the last time this tool tried is wrong or revoked |
+| `auth fails` | counts *consecutive runs that had something to send* and got a 401/403 back; a run that sends successfully, or fails for a different reason, resets it to 0 — but a run with nothing queued at all does neither, so a stale nonzero value can persist through a quiet gap. Nonzero means the key WakaTime saw the last time this tool actually tried to send was wrong or revoked |
+| `accepted 0` with an **empty spool and no `PROBLEM` line** | the dangerous healthy-looking reading. WakaTime rejected every heartbeat outright with a non-retryable 4xx (anything but 401/403/429) — `send.mjs` drops that batch for good, so it never reaches the spool and nothing here flags it. This is not hypothetical: a mistyped path on a self-hosted wakapi/hakatime `api_url` produces exactly this. Every field above reads as a healthy, idle tool while every heartbeat from that run went in the bin; the only trace is the log, a line like `wakatime rejected 3 heartbeat(s), dropping: 400 bad request` |
 
 The full log behind that summary is `~/.config/jyl-wakatime/log`, capped at
 256 KB — the same rotation `jyl-usage` uses, from the `src/core/store.mjs`
-the two tools share.
+the two tools share. `./scripts/wakatime --flush` retries whatever is
+currently spooled right away, reading no stdin — worth running immediately
+after fixing a bad key or a wakapi outage rather than waiting for harness's
+next run to pick the spool back up (which happens automatically too, on
+every hook invocation).
 
 ### There is no `--backfill`
 

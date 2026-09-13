@@ -51,5 +51,14 @@ if command -v node >/dev/null 2>&1; then
   exec node "$ENTRY" "$@"
 fi
 
+# harness discards a hook's stderr and only raises a Problem on a non-zero
+# exit (this script never does that, on purpose) -- so the stderr line above
+# is invisible from inside harness. Without this, "no runtime on PATH" is a
+# silent, undiagnosable failure: --status run from a shell that *does* have
+# bun on PATH looks perfectly healthy. Best-effort: a read-only $HOME must
+# not turn "no runtime" into a non-zero exit.
+LOGDIR="${XDG_CONFIG_HOME:-$HOME/.config}/jyl-wakatime"
+mkdir -p "$LOGDIR" 2>/dev/null || true
+printf '%s jyl-wakatime: no bun or node on PATH; not reporting\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >>"$LOGDIR/log" 2>/dev/null || true
 echo "jyl-wakatime: no bun or node on PATH; not reporting. Set JYL_WAKATIME_RUNTIME to an absolute path to override." >&2
 exit 0

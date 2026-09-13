@@ -1,6 +1,8 @@
 # Reporting harness activity to WakaTime
 
-**Status:** approved design, not yet implemented
+**Status:** implemented and documented (Tasks 1–6); Task 7 (reconcile the
+workspace submodule path) and Task 8 (verify against a real WakaTime
+endpoint) still open
 **Date:** 2026-09-12
 **Repos touched:** `JianyueLab/claude-plugin` (this one), `JianyueLab/harness`
 **Depends on:** harness's `RunEnd` hook —
@@ -321,7 +323,14 @@ instructions — not softened, and not in a footnote under `jyl-usage`'s
 "counts only" promise.
 
 What it sends: absolute file paths, project name, git branch, language, token
-counts, prompt length in characters, model id, and a per-run session id.
+counts, prompt length in characters, and a per-run session id.
+
+It does **not** send the model id, though harness's payload carries one. There is
+nowhere to put it: WakaTime's heartbeat has no model field, and its AI fields
+(`ai_session`, `ai_input_tokens`, `ai_output_tokens`, `ai_prompt_length`,
+`ai_line_changes`, `human_line_changes`, `ai_subscription_plan`) are all
+counts or identifiers of a different kind. An earlier draft of this section
+listed it; the mapping tables above never did, and the code never read it.
 
 What it never sends: prompts, completions, file contents, tool arguments,
 command lines, tool results. harness's payload does not contain any of them

@@ -1,16 +1,34 @@
-# jyl-usage
+# jyl-usage & jyl-wakatime
 
-One repository, one reporter, two hosts. This plugin reports **token usage**
-to the JianyueLab LLM portal ([`llm-web`](https://github.com/JianyueLab/llm-web))
-for both Claude Code and the Antigravity CLI (`agy`) — install it into
-either, or both; each host reports its own usage independently, through the
-same core code.
+Two independent tools live in this repository, sharing only the spool / file
+lock / log plumbing in `src/core/store.mjs` — nothing else:
+
+- **[`jyl-usage`](#jyl-usage)** reports **token usage** to the JianyueLab LLM
+  portal, for Claude Code and the Antigravity CLI (`agy`).
+- **[`jyl-wakatime`](#jyl-wakatime)** reports **harness's coding activity** —
+  which files an agent run touched, and how many tokens it spent — to
+  WakaTime.
+
+They are separate tools on purpose, not two modes of one tool. `jyl-usage`'s
+promise to the people who install it is that only counts leave the machine;
+WakaTime's required `entity` field *is* a file path. Folding the second into
+the first would mean anyone who already trusted `jyl-usage` starts shipping
+file paths after an update they never read the notes for — that is a
+different consent story, not a config flag on the old one.
+
+## jyl-usage
+
+One reporter, two hosts. jyl-usage reports **token usage** to the JianyueLab
+LLM portal ([`llm-web`](https://github.com/JianyueLab/llm-web)) for both
+Claude Code and the Antigravity CLI (`agy`) — install it into either, or
+both; each host reports its own usage independently, through the same core
+code.
 
 The portal meters everything that goes through its `/v1` proxy. Neither host
 usually does: Claude Code talks to Anthropic directly and bills an Anthropic
 subscription, `agy` talks to Google's own Code Assist protocol and bills a
 Gemini subscription, so from the portal's side that spend is invisible either
-way. This plugin closes that gap — after every turn it reads whatever local
+way. jyl-usage closes that gap — after every turn it reads whatever local
 record that host already keeps (Claude Code's session transcript, `agy`'s
 per-conversation SQLite database), extracts the token counts, and POSTs them
 to `/v1/usage/ingest`. The portal stores them beside gateway traffic, tagged
@@ -330,3 +348,164 @@ as a transient failure and spools, not a dropped payload. The route is
 otherwise deliberately ungated: it spends nothing, so refusing a report
 because the reporter is over its allowance would only throw away the evidence
 that they are.
+
+## jyl-wakatime
+
+jyl-wakatime turns harness's `RunEnd` hook payload — one line of JSON, fired
+once per finished agent run — into WakaTime heartbeats: a `file` heartbeat
+for every tool call that named a path, plus one `app` heartbeat per run that
+carries the run's token counts.
+
+```
+harness RunEnd hook (stdin, one JSON line per finished run)
+  └─ scripts/wakatime --detach     forks the real work, returns in ms
+        └─ src/wakatime/main.mjs
+              resolve api key / api url (below)
+              map payload -> heartbeats, throttle repeats
+              POST <api_url>/users/current/heartbeats.bulk, 25 at a time
+```
+
+**What it sends off this machine — stated here, not in a footnote below the
+install instructions:** absolute file paths, the git project name and
+branch, a best-effort programming-language guess from the file extension,
+input and output token counts, the prompt length in characters, and a
+session id it makes up for the run. **It never sends** prompts, completions,
+file contents, tool arguments, command lines, or tool results — harness's
+`RunEnd` payload does not carry any of those to begin with, so this is
+enforced upstream, not by this tool's restraint.
+
+One caveat about those token counts: when a run's `outcome` is `"cancelled"`
+or `"error"` instead of `"ok"`, harness may not have finished accumulating
+that run's *last* turn of usage before it returned — the failing path exits
+before that turn's tokens are added in. This is a deliberate choice on
+harness's side (`outcome` is exactly how a consumer is meant to recognise an
+incomplete run), not a bug here — but jyl-wakatime does not forward `outcome`
+to WakaTime at all, so nothing on the heartbeat itself distinguishes a
+complete run's counts from a possibly-short one. Treat `ai_input_tokens` /
+`ai_output_tokens` as a lower bound, not a guaranteed-exact count, on any run
+that did not end `"ok"`.
+
+### Install: wire it into harness
+
+Add a hook in harness's `config.toml`:
+
+```toml
+[[hooks]]
+event   = "RunEnd"
+command = "/absolute/path/to/harness-plugin/scripts/wakatime"
+args    = ["--detach"]
+```
+
+`--detach` is not optional decoration. `scripts/wakatime` reads the payload
+itself, forks the actual read-and-send work into a background process that
+is not a child of harness at all, and returns within milliseconds. Without
+it, the network round trip to WakaTime runs as harness's own direct child,
+inside harness's hook timeout (10 seconds by default) — a slow send can be
+killed mid-flight, and because the only copy of that run's heartbeats ever
+existed on stdin, that batch is simply gone (see "There is no `--backfill`"
+below).
+
+### Configure
+
+Two values, resolved in this order — first match wins:
+
+```text
+api key:  WAKATIME_API_KEY
+       -> ~/.wakatime.cfg  [settings] api_key
+       -> ~/.config/jyl-wakatime/config.json  { "apiKey": … }
+
+api url:  WAKATIME_API_URL
+       -> ~/.wakatime.cfg  [settings] api_url
+       -> ~/.config/jyl-wakatime/config.json  { "apiUrl": … }
+       -> https://api.wakatime.com/api/v1
+```
+
+**`~/.wakatime.cfg` is checked before this tool's own config, deliberately:**
+anyone who has ever installed a WakaTime editor plugin already has a key
+there, and asking for a second copy of the same secret would be asking for
+it to drift. Only `[settings]`'s `api_key`, `api_url` and `hide_file_names`
+are read from that file; everything else in it (`exclude`, `include`,
+`proxy`, …) is `wakatime-cli`'s business, and unrecognised lines are ignored
+rather than rejected — a future WakaTime release adding a line this tool has
+never heard of will not break it.
+
+Self-hosted **wakapi** or **hakatime**: point `api_url` at it, in either file
+above. A trailing slash is trimmed.
+
+`[settings] hide_file_names = true` (or `"hideFileNames": true` in the JSON
+config) is honoured: file entities are replaced with an obfuscated
+placeholder that keeps only the extension (`agent.go` becomes `HIDDEN.go`; an
+extension-less file becomes `HIDDEN`), while the project name and branch are
+still reported. That trade-off is WakaTime's own, not one invented here.
+
+**No API key anywhere means this tool quietly does nothing.** Not a crash,
+not a log line on every single run — one line logged the first time, then
+silence until the config is fixed. (`JYL_WAKATIME_DISABLED=1`, or
+`"enabled": false` in the JSON config, turns it off the same way, on
+purpose.) An install with no key configured is inert, exactly like
+`jyl-usage`.
+
+### Is it working? (`--status`)
+
+**jyl-wakatime never exits non-zero and never throws, on any path** — a bad
+config, a network failure, an unwritable state directory, none of it may
+turn a harness run red. That agrees with harness's own side: a hook failure
+there is a notice, never an error that fails the run. The cost is silence —
+a broken reporter fails exactly as quietly as a working one, on every
+surface except this one:
+
+```sh
+$ ./scripts/wakatime --status
+jyl-wakatime 0.1.0
+  api url     https://api.wakatime.com/api/v1
+  api key     (unset)   (from nowhere)
+  spool       0 heartbeat(s)
+  last send   never
+  auth fails  0
+  PROBLEM     no API key configured
+```
+
+(that is real output, from a freshly configured `$HOME` with nothing set up
+yet.) Once a key resolves, the `PROBLEM` line disappears and `last send`
+reports what the most recent attempt actually did — for example:
+
+```text
+  api key     waka…cdef   (from /Users/you/.wakatime.cfg)
+  last send   2026-09-12T06:14:02.483Z  accepted 12, failed 0
+```
+
+| Line | What it means |
+|---|---|
+| `PROBLEM` | present at all → nothing is being sent right now; its text says why |
+| `spool` | heartbeats read but not yet accepted by WakaTime; should trend toward 0 across runs, not up. Capped at 5000 — past that, the oldest are dropped, logged as `spool overflow: dropped N oldest events` |
+| `last send` | `accepted N, failed M` from the most recent attempt; `failed` staying above 0 across several runs means something is wrong, not a fluke |
+| `auth fails` | counts *consecutive* attempts rejected with 401/403; one attempt that is not rejected that way resets it to 0. Nonzero means the key WakaTime saw the last time this tool tried is wrong or revoked |
+
+The full log behind that summary is `~/.config/jyl-wakatime/log`, capped at
+256 KB — the same rotation `jyl-usage` uses, from the `src/core/store.mjs`
+the two tools share.
+
+### There is no `--backfill`
+
+`jyl-usage` can rescan transcripts because a transcript is a file that keeps
+existing after the fact. jyl-wakatime has nothing like it: its only input is
+one JSON line on stdin, read once, by a process that then exits. A heartbeat
+that failed to send is retried from the spool; a heartbeat that was never
+produced at all — because the hook never fired, or the process reading stdin
+was killed first — is simply gone. There is no flag for this because there
+is nothing a flag could do about it.
+
+### The payload is a cross-repo contract
+
+harness and jyl-wakatime live in separate repositories and agree on one JSON
+shape with no build step checking that agreement. `tests/fixtures/runend.json`
+in this repo and `hook/testdata/runend.json` in `JianyueLab/harness` must
+stay byte-for-byte identical:
+
+```sh
+diff tests/fixtures/runend.json ../harness/hook/testdata/runend.json
+```
+
+No output means the two still agree. Changing the payload — a renamed field,
+a new property on a tool call — means changing both repositories in the same
+change; neither side's test suite will notice that the other one drifted.

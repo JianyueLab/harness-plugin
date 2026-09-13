@@ -1,8 +1,9 @@
 # Reporting harness activity to WakaTime
 
-**Status:** implemented and documented (Tasks 1–6); Task 7 (reconcile the
-workspace submodule path) and Task 8 (verify against a real WakaTime
-endpoint) still open
+**Status:** implemented, documented and verified against the real WakaTime
+service (Tasks 1–8). See "Verified against the real service" at the end for what
+was observed, what is still unverified (a real agent run; the rendered
+dashboard), and four findings recorded but deliberately not implemented.
 **Date:** 2026-09-12
 **Repos touched:** `JianyueLab/claude-plugin` (this one), `JianyueLab/harness`
 **Depends on:** harness's `RunEnd` hook —
@@ -438,7 +439,9 @@ rename show up here as a red test rather than as missing data.
 ## What has to be verified against the real service
 
 Two things cannot be settled from documentation, and the implementation plan
-needs a step for each.
+needs a step for each. **Both were attempted on 2026-09-13 — see "Verified
+against the real service" at the end of this document. The first is settled;
+the second is only half settled, because no browser was reachable.**
 
 1. **Editor attribution.** The dashboard identifies the editor by parsing the
    User-Agent, and we assemble ours by hand:
@@ -469,3 +472,236 @@ needs a step for each.
    claude-plugin` while the working copy sits at `harness-plugin/`. That has to
    be reconciled before any pin can be committed; it is not this design's
    problem, but it is this change's blocker.
+
+## Verified against the real service (2026-09-13)
+
+Everything in this section was observed first-hand against
+`https://api.wakatime.com/api/v1` with the author's own key, on
+`darwin-27.0.0-arm64`, with harness built from `JianyueLab/harness` at
+`27c49f9`. **Anything not stated here was not observed.** Two things in
+particular were *not* verifiable and are marked as such below: a real harness
+agent run, and the rendered dashboard.
+
+### How the heartbeats were produced
+
+Three heartbeats were sent through the production path: `hook.Runner` (harness's
+own, at `27c49f9`) read the `[[hooks]]` block below out of a `config.toml` via
+harness's own `config.Load`, encoded the payload with harness's own
+`hook.Encode`, and piped it into `scripts/wakatime --detach`, which resolved the
+key through `api_key_vault_cmd`, mapped, and posted.
+
+**What was not exercised: a real agent run.** The environment this verification
+was carried out from would not let the harness binary be started with a prompt
+(three attempts: `-p` with `--permission auto`, with `--permission accept`, and a
+read-only prompt in the default `manual` mode — each refused by that
+environment's own tool-permission classifier, nothing to do with harness;
+`harness --help` ran fine, so the binary itself was not the obstacle). The
+payload's *field values* were therefore hand-built to a realistic shape rather
+than filled by `cmd/harness`'s `RunEnd` observer from live agent events.
+Everything downstream of `hook.Encode` — the wire bytes, the mapping, the
+User-Agent, the request, the account — is real. **The observer that turns an
+`agent.RunRecord` into a `hook.Payload` remains unverified against the live
+service.**
+
+### 1. Editor attribution: `harness` is recognised. No fallback needed.
+
+`GET /users/current/user_agents/ed271f88-1a19-41a1-8102-d4320dc85f30`, the row
+WakaTime created for our request, verbatim:
+
+```json
+{
+  "value": "wakatime/1.0.0 (darwin-27.0.0-arm64) harness/27c49f9 harness-wakatime/0.1.0",
+  "editor": "Harness",
+  "version": "0.1.0",
+  "os": "Mac",
+  "cli_version": "1.0.0",
+  "go_version": null,
+  "ai_model": "Wakatime",
+  "ai_model_version": "1.0.0",
+  "ai_model_complexity": null,
+  "is_desktop_app": false,
+  "is_browser_extension": false
+}
+```
+
+- **`editor` is `"Harness"`** — title-cased from our `harness` token, with no
+  prior registration. **Neither documented fallback is needed:** we do not have
+  to adopt an editor name WakaTime already knows, and we do not have to ask
+  WakaTime to register one.
+- **`os` is `"Mac"`** — correct.
+- **`version` is `0.1.0`, this tool's version, not harness's.** `27c49f9` — the
+  harness version we send — does not land in any field of this resource. This is
+  WakaTime's own scheme rather than a defect on our side: every other plugin in
+  this account parses the same way (`Zed/1.19.2-… macos-wakatime/5.28.5` →
+  `editor: "Zed"`, `version: "5.28.5"`; `Xcode/27.0-… macos-wakatime/5.28.5` →
+  `version: "5.28.5"`). The **editor's** own version is discarded by WakaTime in
+  every case observed.
+- **`ai_model` is `"Wakatime"`, which is wrong, and it is not cosmetic.**
+  WakaTime read our leading `wakatime/1.0.0` token as the AI-model slot. The
+  consequence is visible in the day's summary: `grand_total.ai_model_costs`
+  gained an entry `"Wakatime": 0.097965` and `ai_model_breakdown` gained
+  `{"name": "Wakatime", "lines": 0, "cost": 0.097965}`. harness's run is
+  therefore reported as **dollar spend on a model called "Wakatime"**.
+
+The slot exists because wakatime-cli's User-Agent carries one. Observed shapes
+from the same account (all pre-existing, none ours):
+
+| `value` | `editor` | `version` | `ai_model` / `ai_model_version` |
+|---|---|---|---|
+| `wakatime/v2.26.0 (…) go1.26.6 opus/5 claude-code/2.1.236 antigravity-cli/1.2.0 antigravity-cli-wakatime/1.0.0` | Claude Code | 1.0.0 | Opus / 5 |
+| `wakatime/v2.26.0 (…) go1.26.6 gemini/3.8-flash-high antigravity-cli/1.2.0 antigravity-cli-wakatime/1.0.0` | Antigravity CLI | 1.0.0 | Gemini / 3.8-flash |
+| `wakatime/v2.26.0 (…) go1.26.6 gpt/5.6-sol Xcode/27.0-… macos-wakatime/5.28.5` | Xcode | 5.28.5 | GPT / 5.6-sol |
+| `wakatime/v2.26.0 (…) go1.26.6 Zed/1.19.2-… macos-wakatime/5.28.5` | Zed | 5.28.5 | null / null |
+
+**Recommendation, not implemented here:** insert a `<model>/<version>` token
+ahead of `harness/<version>` in `userAgent()`, sourced from the payload's
+`model` field (which harness already sends and this tool currently ignores).
+That both removes the phantom "Wakatime" model and gives the model a home — see
+§3. The exact grammar WakaTime uses to slot these tokens was **not** determined;
+only the input/output pairs above were observed.
+
+### 2. `type: "app"` with `entity: "harness"` — what could and could not be checked
+
+**Not checked: the rendered dashboard.** No browser was reachable from this
+environment (the browser extension was not connected), and `wakatime.com`'s
+dashboard needs a session cookie, which an API key does not provide. **How the
+app heartbeat *looks* on the dashboard remains unverified.** Nothing below
+should be read as a claim about the rendering.
+
+What *was* checked is the data the dashboard is built on.
+
+`GET /users/current/durations?date=2026-09-13&project=harness-plugin` returned
+our run as three consecutive blocks:
+
+| time (UTC) | entity | type | duration |
+|---|---|---|---|
+| 11:15:29 | `…/harness-plugin/src/wakatime/send.mjs` | file | 28.00s |
+| 11:15:57 | `…/harness-plugin/.temp/e2e-workspace/probe.txt` | file | 11.00s |
+| 11:16:08 | `harness` | app | 29.27s |
+
+- The app block sits **beside** the file blocks in the same project, not on top
+  of them: 28 + 11 + 29.27 = 68.27s, which is exactly the `Harness` figure in
+  the day's `editors` breakdown (`68.267582`). **No double counting was
+  observed.**
+- The same endpoint shows this account's *other* AI tools doing the same thing:
+  Claude Code's own WakaTime integration emits `entity: "Claude <session-uuid>"`,
+  `type: "app"`, and Antigravity CLI emits `entity: "Antigravity CLI <uuid>"`,
+  `type: "app"` — same project, same `category: "AI Coding"`. Our shape is the
+  shape the reference implementations use. (They put the session id *in* the
+  entity; we keep it in `ai_session` and use a bare `harness`.)
+- App heartbeats are assigned `language: "Other"` by WakaTime (ours and Claude
+  Code's alike), so the run heartbeat contributes to an "Other" language bucket.
+- `branch` is `null` on our app heartbeat, per the mapping table above. Claude
+  Code's app heartbeats do carry a branch.
+
+**Nothing observed indicates the documented alternative** (moving the token
+fields onto the run's last file heartbeat) is needed — but the question it was
+meant to answer, how it renders, is still open.
+
+### 3. The `model` field: settled, both halves
+
+An earlier review marked "WakaTime's heartbeat has no `model` field" as
+unverified. It is now verified, by sending one and reading it back:
+
+- A probe heartbeat was posted with `"model": "gpt-5.6-sol"` and
+  `"ai_cached_input_tokens": 4242`. It was accepted (per-item `201`).
+- Reading it back from `GET /users/current/heartbeats?date=2026-09-13`, the
+  stored resource has **26 keys and none of them is `model`**:
+  `ai_cached_input_tokens, ai_input_tokens, ai_line_changes, ai_output_tokens,
+  ai_prompt_length, ai_session, ai_subscription_plan, branch, category,
+  created_at, cursorpos, dependencies, entity, human_line_changes, id, is_write,
+  language, lineno, lines, machine_name_id, project, project_root_count, time,
+  type, user_agent_id, user_id`. The `model` we sent was silently dropped.
+
+So the Privacy section's first clause holds: **the heartbeat body has no model
+field.** Its second clause does not: **"There is nowhere to put it" is wrong.**
+The User-Agent has an AI-model slot (§1), WakaTime parses it into
+`ai_model` / `ai_model_version` on the user-agent resource, and it drives
+`ai_model_costs` / `ai_model_breakdown` / `ai_model_line_changes` in the
+summaries. Sending the model would be a real change in what leaves the machine
+and belongs in the Privacy section either way — **it is recorded here as a
+finding, not made.**
+
+**Also found, unprompted: `ai_cached_input_tokens` exists and is writable.** The
+4242 we sent came back stored. The mapping above folds
+`cache_read_input_tokens` + `cache_creation_input_tokens` into
+`ai_input_tokens` because "splitting them out would need a field WakaTime does
+not have" — that reason is now known to be false. Whether to split them is a
+judgement call, not a bug; recorded, not changed.
+
+### 4. What leaves the machine — checked, not inferred
+
+The exact request body for the run above, as `heartbeatsFrom` produced it:
+
+```json
+[
+  {"entity":"/Users/jhl/…/harness-plugin/src/wakatime/send.mjs","type":"file","time":1789298129.732418,
+   "category":"ai coding","is_write":false,"project":"harness-plugin","branch":"feat/wakatime","language":"JavaScript"},
+  {"entity":"/Users/jhl/…/harness-plugin/.temp/e2e-workspace/probe.txt","type":"file","time":1789298157.732418,
+   "category":"ai coding","is_write":true,"project":"harness-plugin","branch":"feat/wakatime"},
+  {"entity":"harness","type":"app","time":1789298168.732418,"category":"ai coding",
+   "ai_session":"task8e2e00000001","ai_input_tokens":23843,"ai_output_tokens":887,
+   "ai_prompt_length":214,"project":"harness-plugin"}
+]
+```
+
+Paths, project, branch, language, timestamps, counts, a session id. No prompt,
+no completion, no command line, no file content, no tool argument, no tool
+result. `language` is absent on the `.txt` entity, as designed — WakaTime's
+server guessed `"Text"` for it.
+
+The payload harness itself wrote to the hook's stdin was read back in full.
+The `bash` tool call appears as
+`{"name":"bash","at":…,"elapsed_ms":2400,"is_error":false}` — **the `path` key is
+absent entirely, and the command line appears nowhere.** A string that existed
+only on a command line was grepped for across the whole state directory and not
+found.
+
+**The log file was never created.** A healthy run logs nothing, so
+`~/.config/jyl-wakatime/log` does not exist after one — which means the
+"grep the log for leaks" check passes *vacuously*: `grep … ~/.config/jyl-wakatime/log
+|| echo "log is clean"` prints `log is clean` because the file is missing, not
+because a file was examined. Grepping the whole state directory (including
+`state.json`, which does hold file paths by design) found no `new_string`,
+`old_string`, `tool_result`, `password` or `api_key`.
+
+### 5. Smaller things that only a real request showed
+
+- **`POST …/heartbeats.bulk` answers `202 ACCEPTED`, not `201`**, with a body of
+  `{"responses": [[{"data": {"id": …}}, 201]]}` — per-item codes nested one level
+  deeper than "an array of per-item status codes" suggests. `send.mjs` treats any
+  `res.ok` as success and does not read the per-item codes at all, so the Sending
+  section's "items that individually failed are logged" does not describe the
+  code. Observed, not changed.
+- **`category: "ai coding"` is accepted and comes back as `"AI Coding"`.**
+- **The machine is reported as "Unknown Hostname".** The day's `machines`
+  breakdown attributes exactly `68.267582s` — all of harness's time — to
+  `Unknown Hostname`, while every wakatime-cli-sent heartbeat in the account
+  lands on `jhlsMacBookPro`. `send.mjs` sends no machine-name header. Fixing it
+  would mean sending the hostname, which is new data leaving the machine and a
+  Privacy-section change; recorded, not made.
+- **The user-agent resource is created asynchronously.** Its `created_at` was
+  `11:17:12Z` for a heartbeat whose `last_seen_at` is `11:16:08Z`, and it was
+  absent from `GET /users/current/user_agents` (capped at 100 rows, newest
+  `last_seen_at` first) for about a minute afterwards. A verification that reads
+  that list immediately after sending will not find the entry.
+- **Project and branch detection worked on the real repo**: `project:
+  "harness-plugin"`, `branch: "feat/wakatime"`, cached in `state.json` keyed by
+  `workspace_root`, as designed.
+- **`config.Load` applies `timeout_seconds = 10`** to a `[[hooks]]` block that
+  omits it.
+
+### 6. The `[[hooks]]` block that was used
+
+```toml
+[[hooks]]
+event   = "RunEnd"
+command = "/Users/jhl/Documents/Dev/JianyueLab/harness-plugin/scripts/wakatime"
+args    = ["--detach"]
+```
+
+It was **not** written into the user's own `config.toml`, and that file was not
+touched: on this machine it is a symlink into the nix store, managed by
+home-manager, so editing it in place is neither possible nor right. It was
+passed to harness as `--config <copy>` instead, which exercises the same
+`config.Load` path.

@@ -1,0 +1,55 @@
+#!/usr/bin/env sh
+# Launcher for the WakaTime reporter.
+#
+# Deliberately a second launcher rather than a flag on scripts/run: jyl-usage
+# sends counts only, this one sends file paths. Two privacy postures sharing
+# one entry point is how a shared config path and an accidental cross-import
+# get introduced later.
+#
+# Never exits non-zero. This is bookkeeping; a harness run must not go red
+# because a reporter could not find a runtime.
+set -eu
+
+ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+ENTRY="$ROOT/src/wakatime/main.mjs"
+
+# A project-level NODE_OPTIONS is meant for that project's code, not for a
+# hook it knows nothing about.
+if [ -n "${NODE_OPTIONS:-}" ]; then
+  unset NODE_OPTIONS
+fi
+
+DETACH=0
+ARGS=""
+for arg in "$@"; do
+  if [ "$arg" = "--detach" ]; then
+    DETACH=1
+  else
+    ARGS="$ARGS $arg"
+  fi
+done
+
+if [ "$DETACH" = "1" ]; then
+  # The payload is read here because the child cannot: this process owns stdin.
+  PAYLOAD=$(cat 2>/dev/null || true)
+  # $ARGS is intentionally unquoted so it re-splits on whitespace. Safe because
+  # the only caller is harness's [[hooks]] args, which carry no paths.
+  # shellcheck disable=SC2086
+  ( printf '%s' "$PAYLOAD" | "$0" $ARGS >/dev/null 2>&1 & ) </dev/null >/dev/null 2>&1
+  exit 0
+fi
+
+if [ -n "${JYL_WAKATIME_RUNTIME:-}" ] && [ -x "${JYL_WAKATIME_RUNTIME}" ]; then
+  exec "${JYL_WAKATIME_RUNTIME}" "$ENTRY" "$@"
+fi
+
+if command -v bun >/dev/null 2>&1; then
+  exec bun "$ENTRY" "$@"
+fi
+
+if command -v node >/dev/null 2>&1; then
+  exec node "$ENTRY" "$@"
+fi
+
+echo "jyl-wakatime: no bun or node on PATH; not reporting. Set JYL_WAKATIME_RUNTIME to an absolute path to override." >&2
+exit 0

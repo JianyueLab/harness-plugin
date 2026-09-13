@@ -178,6 +178,7 @@ key serve both services — which is the opposite of what the separation is for.
 ```text
 api key:  WAKATIME_API_KEY
        -> ~/.wakatime.cfg  [settings] api_key
+       -> ~/.wakatime.cfg  [settings] api_key_vault_cmd  (output of the command, trimmed)
        -> ~/.config/jyl-wakatime/config.json  { "apiKey": … }
 
 api url:  WAKATIME_API_URL
@@ -198,7 +199,22 @@ in `/` is trimmed; the tool posts to `<api_url>/users/current/heartbeats.bulk`.
 
 `[settings] hide_file_names` is honoured — see Privacy.
 
-The cfg file is INI. Parse only `[settings]`, only the four keys above, and
+`[settings] api_key_vault_cmd` is `wakatime-cli`'s own escape hatch for a key
+kept in a password manager: run the named command, treat its trimmed stdout
+as the key. Split into argv like a shell would (quotes, backslash escapes, a
+leading `~/` or bare `~` expanded to `$HOME`), but never handed to an actual
+shell — no pipes, no `$VAR` expansion, no `;` chaining. `api_key` wins if
+both are present; the command never runs in that case. A failing command
+(not found, non-zero exit, timed out, empty output) never yields a key and
+never throws, but is diagnosed distinctly from "no key configured at all" —
+see the failure table below — without ever logging the command or its
+output. The 5s timeout on the command is sized against harness's own 10s
+hook timeout (`DefaultHookTimeoutSeconds`), not picked independently: it has
+to fire, log, and return well before harness would kill an undetached hook
+process out from under it.
+
+The cfg file is INI. Parse only `[settings]`, only the four keys named just
+above — `api_key`, `api_key_vault_cmd`, `api_url`, `hide_file_names` — and
 never fail on anything else in it: `exclude` / `include` / `proxy` and the rest
 are the CLI's business, and a parser that throws on an unfamiliar line would
 break on WakaTime's next release.
@@ -364,6 +380,7 @@ jyl-wakatime 0.1.0
 | What happened | What the tool does |
 |---|---|
 | no key anywhere | log once, exit 0, `--status` says "no API key configured" |
+| `api_key_vault_cmd` configured but fails (not found / non-zero exit / timed out / empty output) | log once, exit 0 — but `--status` says which of those it was, not the generic "no API key configured", and never the command or its output |
 | stdin is not valid JSON | log, exit 0 |
 | payload's `event` is not `RunEnd` | log, exit 0 — forward compatibility with a harness that grows more events |
 | WakaTime down | spool, retry next turn |

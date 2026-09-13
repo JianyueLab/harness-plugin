@@ -470,22 +470,38 @@ this tool has never heard of will not break it.
 plaintext** — the same option `wakatime-cli` itself supports, so an existing
 editor plugin's config Just Works here too. Its value is a command; **this
 tool runs it and treats whatever it prints on stdout, trimmed, as the key.**
-It is split into a command and arguments the way a shell would (quotes and
-backslash escapes are understood), but it is never handed to an actual
-shell — no pipes, no `$VAR` expansion, no `; second-command`. If both
-`api_key` and `api_key_vault_cmd` are present, `api_key` wins and the command
-never runs.
+It is split into a command and arguments the same way `wakatime-cli` itself
+splits this value (quotes and backslash escapes are understood, and a
+leading `~/` or bare `~` is expanded to your home directory — writing a
+path with `~` in it is fine), but nothing else is interpreted: no pipes, no
+`$VAR` expansion, no `;` chaining, no `` ` `` or `$(...)` substitution — it
+is never handed to an actual shell. If both `api_key` and
+`api_key_vault_cmd` are present, `api_key` wins and the command never runs.
 
-The command gets 5 seconds. If it is missing, exits non-zero, times out, or
-prints nothing at all, **that is indistinguishable from having no key
-configured** — same silent no-op, same one-line log, same `--status` output
-as an empty config. Nothing about *why* the command failed is logged,
-including its stderr: a vault command's failure output is exactly the kind
-of place a key, a passphrase prompt, or other secret-shaped text could leak,
-so it is discarded unread rather than risk that. When it does succeed,
-`--status` attributes the key to `api_key_vault_cmd`, not to
-`~/.wakatime.cfg`'s path, so a key resolved this way is visibly different
-from one written in plaintext (see below).
+The command gets 5 seconds — sized against harness's own 10-second default
+hook timeout mentioned above, with headroom to spare, so this tool's own
+timeout fires and gets logged well before harness would kill an undetached
+hook process out from under it. If the command is missing, exits non-zero,
+times out, or prints nothing at all, it never yields a key and never
+crashes — but unlike an outright absent config, `--status` and the log say
+*which* of those happened (`api_key_vault_cmd: command not found`,
+`: exited 9`, `: timed out`, or `produced no output`), so it doesn't read
+identically to "you never configured a key." What is never logged, on any
+of those paths, is the command itself or anything it printed: a failing
+vault command's stderr is exactly the kind of place a key, a passphrase
+prompt, or other secret-shaped text could leak, so it is discarded unread
+rather than risk that. When it does succeed, `--status` attributes the key
+to `api_key_vault_cmd`, not to `~/.wakatime.cfg`'s path, so a key resolved
+this way is visibly different from one written in plaintext (see below).
+
+**If `--status` says `api_key_vault_cmd: command not found` for a command
+you know exists,** check `PATH` before anything else: the hook runs with
+whatever environment harness itself inherited, which on macOS is often *not*
+your interactive shell's `PATH` (a GUI- or launchd-started harness commonly
+gets a bare `/usr/bin:/bin`) — exactly where a password-manager CLI
+installed via Homebrew (`/opt/homebrew/bin/…`) or a language-specific
+installer would be missing. An absolute path in `api_key_vault_cmd` sidesteps
+this entirely.
 
 Self-hosted **wakapi** or **hakatime**: point `api_url` at it, in either file
 above. A trailing slash is trimmed.

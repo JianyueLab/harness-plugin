@@ -127,6 +127,19 @@ export async function runHook({ store, stdinText, cfg, now, send = sendAll, harn
           platform: process.platform,
           release: os.release(),
           arch: process.arch,
+          // The model rides in the User-Agent, not on the heartbeat -- the
+          // heartbeat resource has no model field at all (Task 8 sent one and
+          // read it back; it was silently dropped). See send.mjs.
+          //
+          // It is deliberately read from `payload`, not carried on any
+          // heartbeat, which means one thing worth naming: this UA labels
+          // *every* heartbeat in the request, including any spooled by an
+          // earlier run under a different model, and `--flush` (no payload at
+          // all) sends no model token. `harness_version` above already has
+          // exactly this property. Per-heartbeat attribution would need a
+          // per-heartbeat UA, i.e. one request per model, which is not worth a
+          // batch split for a field WakaTime only keeps per user-agent row.
+          model: payload?.model,
         }),
         // send.mjs calls ctx.log unguarded -- this must never be absent.
         // store.log already swallows its own failures, so this satisfies

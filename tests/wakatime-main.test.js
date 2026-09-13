@@ -41,6 +41,16 @@ test("a good payload turns into heartbeats and goes out", async () => {
       expect(ctx.apiKey).toBe("k");
       expect(ctx.apiUrl).toBe("https://x/api/v1");
       expect(ctx.ua).toContain("harness-wakatime/");
+      // The model reaches WakaTime only through the User-Agent -- the
+      // heartbeat resource has no model field. Nothing else in the suite
+      // covers the wiring from `payload.model` to `userAgent({model})`, so
+      // dropping that one property would otherwise stay green while the
+      // account silently regained its phantom "Wakatime" model.
+      expect(ctx.ua).toContain(" claude-opus-5 "); // fixture model, verbatim
+      expect(ctx.ua).toContain(" harness/27.0.17 "); // fixture harness_version
+      // Never split into name/version: that shape buckets by the half before
+      // the slash, which is how harness's spend landed in Claude Code's row.
+      expect(ctx.ua).not.toContain("claude/opus-5");
       sent.push(...beats);
       return { tally: { sent: beats.length }, failed: [], authFailed: false };
     },
@@ -48,6 +58,30 @@ test("a good payload turns into heartbeats and goes out", async () => {
 
   expect(sent).toHaveLength(3);
   expect(store.readSpool()).toHaveLength(0);
+});
+
+// --flush has no payload, so there is no model to name. Asserted because the
+// obvious "just always append a model token" refactor would emit a bare
+// `undefined` here, and WakaTime would dutifully record an AI model called
+// "Undefined" against the user's account.
+test("a flush with nothing on stdin sends a user agent with no model token", async () => {
+  const store = freshStore("flush-ua");
+  store.writeSpool([{ entity: "/a.go", type: "file", time: 1, category: "ai coding" }]);
+  let seen = null;
+  await runHook({
+    store,
+    stdinText: "",
+    cfg: { apiKey: "k", apiUrl: "https://x/api/v1", hideFileNames: false, enabled: true },
+    now: 1_000,
+    send: async (ctx, beats) => {
+      seen = ctx.ua;
+      return { tally: { sent: beats.length, accepted: beats.length }, failed: [], authFailed: false };
+    },
+  });
+
+  expect(seen).toContain("go0.0.0 harness/");
+  expect(seen).not.toContain("undefined");
+  expect(seen).not.toContain("null");
 });
 
 test("what could not be delivered lands in the spool and goes again next run", async () => {

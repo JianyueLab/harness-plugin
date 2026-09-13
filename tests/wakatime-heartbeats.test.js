@@ -48,13 +48,51 @@ test("token fields ride only on the run heartbeat", () => {
   expect(run.ai_session).toBe("3f9a1c7e2b4d5068");
   expect(run.ai_prompt_length).toBe(214);
   expect(run.ai_output_tokens).toBe(887);
-  // All three input counters summed: cache reads are tokens the model
-  // processed and the subscription paid for.
-  expect(run.ai_input_tokens).toBe(12043 + 11800 + 0);
+  // Cache reads have their own field; only input + cache *creation* count as
+  // fresh input. Verified writable against the live API in Task 8 — the
+  // earlier "WakaTime has no field for this" reason was wrong.
+  expect(run.ai_input_tokens).toBe(12043 + 0);
+  expect(run.ai_cached_input_tokens).toBe(11800);
 
   // A run that edits five files must not report its tokens five times.
   expect(file.ai_input_tokens).toBeUndefined();
+  expect(file.ai_cached_input_tokens).toBeUndefined();
   expect(file.ai_session).toBeUndefined();
+});
+
+// The fixture has cache_creation_input_tokens = 0, so it cannot tell the two
+// input counters apart from the cached one: summing all three, or moving
+// creation into the cached field, both still produce 12043 / 11800 there. Three
+// distinct non-zero values is the only shape that pins which counter goes
+// where, and it is exactly the case the old "sum all three" behaviour got
+// wrong.
+test("cache creation counts as fresh input; only cache reads are cached", () => {
+  const beats = heartbeatsFrom(
+    {
+      ...payload,
+      usage: {
+        input_tokens: 100,
+        output_tokens: 7,
+        cache_creation_input_tokens: 20,
+        cache_read_input_tokens: 300,
+      },
+    },
+    opts,
+  );
+  const run = beats.find((b) => b.type === "app");
+  expect(run.ai_input_tokens).toBe(120);
+  expect(run.ai_cached_input_tokens).toBe(300);
+  expect(run.ai_output_tokens).toBe(7);
+  // Nothing is lost or double-counted: the two fields still total what the
+  // single folded field used to report.
+  expect(run.ai_input_tokens + run.ai_cached_input_tokens).toBe(100 + 20 + 300);
+});
+
+test("a missing usage object leaves both input fields at zero, not NaN", () => {
+  const run = heartbeatsFrom({ ...payload, usage: undefined }, opts).find((b) => b.type === "app");
+  expect(run.ai_input_tokens).toBe(0);
+  expect(run.ai_cached_input_tokens).toBe(0);
+  expect(run.ai_output_tokens).toBe(0);
 });
 
 test("a run that touched no file still produces the run heartbeat", () => {

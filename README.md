@@ -370,18 +370,57 @@ install instructions:** absolute file paths, each touched file's timestamp
 and whether the tool call that touched it was a write or a read
 (`is_write`), the git project name and branch, a best-effort
 programming-language guess from the file extension, input and output token
-counts, the prompt length in characters, and the session id — **not
+counts (fresh input and cache-served input reported separately),
+the prompt length in characters, **the model id**, and the session id — **not
 one this tool invents per run**, but the id harness generates once for its
 own process and stamps into every run's payload, so it is a single value
 shared by everything that process reports, not a fresh one per run. The
-request itself also carries a User-Agent identifying this tool, harness, and
-the machine, e.g.
-`wakatime/1.0.0 (darwin-27.0.0-arm64) harness/27.0.17 harness-wakatime/0.1.0`
-— OS, kernel release, CPU architecture, harness's version and this tool's
-own. **It never sends** prompts, completions, file contents, tool arguments,
-command lines, or tool results — harness's `RunEnd` payload does not carry
-any of those to begin with, so this is enforced upstream, not by this tool's
-restraint.
+request itself also carries a User-Agent identifying this tool, harness, the
+model and the machine, e.g.
+`wakatime/1.0.0 (darwin-27.0.0-arm64) go0.0.0 claude-opus-5 harness/27.0.17 harness-wakatime/0.1.0`
+— OS, kernel release, CPU architecture, the model, harness's version and this
+tool's own. **It never sends** prompts, completions, file contents, tool
+arguments, command lines, or tool results — harness's `RunEnd` payload does
+not carry any of those to begin with, so this is enforced upstream, not by
+this tool's restraint.
+
+**The model id is on that list, and an earlier version of this README said it
+was not.** The reason given was "WakaTime's heartbeat has no model field, so
+there is nowhere to put it". The first half is true — a heartbeat posted with a
+`model` field comes back stored without it, checked against the live API — but
+the conclusion was wrong. **WakaTime keeps the model in the User-Agent**, in the
+`claude-opus-5` slot above, which it parses out and uses for the AI-model cost
+and line-change breakdowns on your dashboard. Every other AI tool reporting into
+WakaTime already fills that slot.
+
+**On your dashboard the model shows up as `Claude-Opus-5`** — the whole model
+name, one row per exact model, with no version. It is sent as a single token on
+purpose: WakaTime buckets AI-model cost by **name only** (the version it parses
+out appears in none of the cost, line-change or breakdown structures), so a
+`claude/opus-5`-style token would put every Claude model — opus, sonnet, haiku —
+into one `Claude` bucket. Worse, in a real account that bucket is not "the Claude
+model" at all: it is Claude Code's own `ClaudeCode/<app version>` token, which
+WakaTime misreads as a model, so harness's spend would vanish into another tool's
+row and inflate its numbers.
+
+The trade-off is that harness's Opus time will **not** merge with Claude Code's
+`Opus` row. That is deliberate: there is no consistent model naming across
+WakaTime integrations to merge with anyway, and slicing your time by tool is what
+the **Editors** breakdown is for, where `Harness` is already its own row.
+
+Leaving it empty was not the neutral choice it looked like: WakaTime's parser is
+positional, and with the slot empty it took the User-Agent's own leading
+`wakatime/1.0.0` token as the model — so the dashboard grew **a model called
+"Wakatime" with real dollar figures against it**. The `go0.0.0` token above is
+what holds that position; its value is ignored and deliberately fake, because
+this tool has no Go version to report and a hardcoded one would go stale while
+still reading as authoritative.
+
+Why this trade is fine: a model id is far less sensitive than what this tool
+already sends on purpose — your absolute file paths and project names. It says
+which model did the work, not what the work was. If a model id is more than you
+want to share, the file paths already are too; use `hide_file_names`, or do not
+install this.
 
 One caveat about those token counts: when a run's `outcome` is `"cancelled"`
 or `"error"` instead of `"ok"`, harness may not have finished accumulating
@@ -391,7 +430,8 @@ harness's side (`outcome` is exactly how a consumer is meant to recognise an
 incomplete run), not a bug here — but jyl-wakatime does not forward `outcome`
 to WakaTime at all, so nothing on the heartbeat itself distinguishes a
 complete run's counts from a possibly-short one. Treat `ai_input_tokens` /
-`ai_output_tokens` as a lower bound, not a guaranteed-exact count, on any run
+`ai_cached_input_tokens` / `ai_output_tokens` as a lower bound, not a
+guaranteed-exact count, on any run
 that did not end `"ok"`.
 
 ### Install: wire it into harness

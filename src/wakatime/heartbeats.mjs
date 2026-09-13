@@ -62,10 +62,24 @@ export function heartbeatsFrom(payload, { project, branch, hideFileNames } = {})
     time: payload.ended_at,
     category: CATEGORY,
     ai_session: payload.session_id,
-    // All three input counters. Cache reads are tokens the model processed and
-    // the subscription paid for; WakaTime has no field to split them out.
-    ai_input_tokens:
-      (usage.input_tokens ?? 0) + (usage.cache_read_input_tokens ?? 0) + (usage.cache_creation_input_tokens ?? 0),
+    // Cache reads go in their own field rather than being folded into
+    // ai_input_tokens. An earlier draft summed all three input counters
+    // because "WakaTime has no field to split them out" — that reason was
+    // checked against the live API in Task 8 and is false:
+    // `ai_cached_input_tokens` exists and is writable (4242 was sent and came
+    // back stored). Folding them together made a run's fresh input look larger
+    // than it was, for no gain.
+    //
+    // **Cache *creation* stays on the fresh side, with `input_tokens`.** Only
+    // the read counter moves. Creation tokens are tokens the model actually
+    // processed this turn — they were sent up in full and written into the
+    // cache on the way through, which is why providers bill them at a premium
+    // rather than at the cache-hit rate. Only `cache_read_input_tokens` names
+    // tokens that were *served from* the cache instead of processed. The two
+    // fields therefore still add up to the same total as before; nothing is
+    // lost or double-counted, the split just stops overstating fresh input.
+    ai_input_tokens: (usage.input_tokens ?? 0) + (usage.cache_creation_input_tokens ?? 0),
+    ai_cached_input_tokens: usage.cache_read_input_tokens ?? 0,
     ai_output_tokens: usage.output_tokens ?? 0,
     ai_prompt_length: payload.prompt_chars ?? 0,
   };

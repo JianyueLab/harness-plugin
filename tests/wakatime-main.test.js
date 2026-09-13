@@ -572,6 +572,52 @@ test("I-1: with no send override, the real sendAll posts to the real URL with th
   expect(store.readSpool()).toHaveLength(0);
 });
 
+// N-1 (re-review, Important): the fix round made `accepted` honest but threw
+// `tally.rejected` away, so a *partially* refused run -- 3 heartbeats out, 1
+// dropped for good -- rendered `accepted 2, failed 0`, empty spool, no PROBLEM.
+// Not merely idle-looking: completely healthy-looking, with no rule in the
+// README letting a reader detect it, on the exact loss this round exists to
+// expose. Per-item refusals are usually partial, so that is the common shape.
+// Driven through the real sendAll (no `send` override) so the number is the
+// producer's, not a stub's.
+test("N-1: --status names heartbeats WakaTime refused outright, instead of reading as healthy", async () => {
+  const store = freshStore("rejected-visible");
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async () =>
+    new Response(
+      JSON.stringify({ responses: [[{ data: { id: 1 } }, 201], [{ errors: ["nope"] }, 400], [{ data: { id: 3 } }, 201]] }),
+      { status: 202 },
+    );
+  const cfg = { apiKey: "k", apiUrl: "https://x.invalid/api/v1", hideFileNames: false, enabled: true };
+  try {
+    await runHook({ store, stdinText: fixture, cfg, now: 1_000, runGit: () => "" });
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+
+  expect(renderStatus({ store, cfg })).toContain("accepted 2, failed 0, rejected 1");
+  expect(store.readSpool()).toHaveLength(0); // dropped for good, exactly as before
+});
+
+test("N-1: a healthy run's last-send line is unchanged -- the number appears only when it is real", async () => {
+  const store = freshStore("rejected-quiet");
+  const cfg = { apiKey: "k", apiUrl: "https://x/api/v1", enabled: true };
+  await runHook({
+    store,
+    stdinText: fixture,
+    cfg,
+    now: 1_000,
+    runGit: () => "",
+    send: async (_ctx, beats) => ({ tally: { sent: beats.length, accepted: beats.length, rejected: 0 }, failed: [], authFailed: false }),
+  });
+
+  const out = renderStatus({ store, cfg });
+  expect(out).toContain("accepted 3, failed 0");
+  // Every sample in the README and the spec is a healthy run; they must stay
+  // literally correct.
+  expect(out).not.toContain("rejected");
+});
+
 // I-3 (Important): `loadWakaConfig`'s resolution of hide_file_names is tested,
 // and `heartbeatsFrom`'s obfuscation is tested, but the wire between them was
 // not: deleting `hideFileNames: cfg.hideFileNames` from runHook's

@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { BATCH_SIZE, aiModelToken, authHeader, sendAll, userAgent } from "../src/wakatime/send.mjs";
+import { BATCH_SIZE, aiModelToken, authHeader, perItemStatuses, sendAll, userAgent } from "../src/wakatime/send.mjs";
 
 const beat = (i) => ({ entity: `/f${i}.go`, type: "file", time: i, category: "ai coding" });
 const beats = (n) => Array.from({ length: n }, (_, i) => beat(i));
@@ -133,6 +133,96 @@ test("a per-item transient code is owed back to the spool; a per-item 401 is an 
   expect(lines.join("\n")).toContain("deferred 2 of 3 heartbeat(s) individually (will retry): 500 x1, 401 x1");
 });
 
+// N-2 (re-review): `perItemStatuses` understood exactly one wire shape, and two
+// plausible others silently read as full success -- measured end-to-end against
+// a loopback fake: `accepted 3, failed 0`, no log, i.e. the pre-fix I-2 bug
+// intact for those servers. The flat form is not hypothetical: it is literally
+// what §Sending said before this round ("an array of per-item status codes"),
+// so it is what someone implementing wakapi/hakatime against that sentence
+// emits.
+test("the flat `responses: [400, …]` shape is read too, not counted as full success", async () => {
+  const { ctx, lines } = logging(() => new Response(JSON.stringify({ responses: [201, 400, 201] }), { status: 202 }));
+  const res = await sendAll(ctx, beats(3));
+
+  expect(res.tally.accepted).toBe(2);
+  expect(res.tally.rejected).toBe(1);
+  expect(lines.join("\n")).toContain("wakatime rejected 1 of 3 heartbeat(s) individually, dropping: 400 x1");
+});
+
+test("status codes arriving as strings are read as codes, in either shape", async () => {
+  for (const responses of [
+    ["201", "400", "201"],
+    [[{ data: {} }, "201"], [{ errors: ["nope"] }, "400"], [{ data: {} }, "201"]],
+  ]) {
+    const { ctx, lines } = logging(() => new Response(JSON.stringify({ responses }), { status: 202 }));
+    const res = await sendAll(ctx, beats(3));
+
+    expect(res.tally.accepted).toBe(2);
+    expect(res.tally.rejected).toBe(1);
+    expect(lines.join("\n")).toContain("dropping: 400 x1");
+  }
+});
+
+// N-4 (re-review): a `responses` list whose length does not match the batch is
+// proof that this server's verdicts are not positional -- applying them by
+// index anyway keeps the counts plausible while dropping or respooling the
+// *wrong* heartbeat, and the unmentioned tail silently becomes "accepted".
+test("a responses list that does not match the batch length is logged, not applied by index", async () => {
+  for (const responses of [[201, 400], [400, 400, 400, 400, 400]]) {
+    const { ctx, lines } = logging(() => new Response(JSON.stringify({ responses }), { status: 202 }));
+    const res = await sendAll(ctx, beats(3));
+
+    expect(res.tally.accepted).toBe(3); // counted as accepted...
+    expect(res.tally.rejected).toBe(0);
+    expect(res.failed).toHaveLength(0);
+    // ...but never silently: the server's disagreement with the protocol is the
+    // whole point of the line.
+    expect(lines.join("\n")).toContain(
+      `wakatime: bulk response listed ${responses.length} per-item result(s) for a batch of 3`,
+    );
+  }
+});
+
+// N-3 (re-review): the one mutation of nineteen that survived. §Sending states
+// this exception and argues for it -- a refused *request* means the endpoint is
+// pushing back on traffic, while a 202 means it took the traffic and objected
+// to one row inside it -- so the code and that paragraph have to be pinned
+// together, or the paragraph quietly stops describing the code.
+test("a per-item 429 spools that heartbeat but does not stop the remaining batches", async () => {
+  const { ctx, calls, lines } = logging((n) =>
+    n === 1
+      ? new Response(JSON.stringify({ responses: [429, ...Array(24).fill(201)] }), { status: 202 })
+      : new Response(JSON.stringify({ responses: Array(5).fill(201) }), { status: 202 }),
+  );
+  const res = await sendAll(ctx, beats(30));
+
+  expect(calls).toHaveLength(2); // the second batch was still sent
+  expect(calls.map((c) => c.body.length)).toEqual([25, 5]);
+  expect(res.failed.map((b) => b.entity)).toEqual(["/f0.go"]); // only the refused one is owed
+  expect(res.tally.accepted).toBe(29);
+  expect(lines.join("\n")).toContain("deferred 1 of 25 heartbeat(s) individually (will retry): 429 x1");
+});
+
+// N-9 (re-review): the per-item path logs codes only, but the whole-request
+// path interpolated the server's body verbatim -- the two halves of one file
+// disagreeing about whether server text may reach this tool's log. Bodies now
+// go through safeBody: key redacted (a server that echoes the request back must
+// not put Authorization in our log), one line (a body cannot forge entries in a
+// one-line-per-event log), bounded (the log rotates at 256 KB and one HTML
+// error page could push every real line out of it).
+test("a rejected batch's log line carries no key, no newlines, and no unbounded body", async () => {
+  const nasty = `waka_secret leaked\n2026-01-01T00:00:00Z jyl-wakatime: forged line\n${"A".repeat(5000)}`;
+  const { ctx, lines } = logging(() => new Response(nasty, { status: 400 }));
+  await sendAll(ctx, beats(2));
+
+  const line = lines.join("\n");
+  expect(line).toContain("wakatime rejected 2 heartbeat(s), dropping: 400");
+  expect(line).not.toContain("waka_secret"); // the key never reaches the log, whoever wrote it
+  expect(line).not.toContain("\n"); // one event, one line: no forged entries
+  expect(line.length).toBeLessThan(400); // bounded; the raw body is 5000+
+  expect(line).toContain("chars)"); // and says it was truncated
+});
+
 test("a 202 that carries no per-item verdict is read as accepted, not as lost", async () => {
   // A self-hosted wakapi/hakatime answering `{}`, a body that is not JSON at
   // all, and an empty `responses` array all mean "nothing said about any item".
@@ -147,6 +237,46 @@ test("a 202 that carries no per-item verdict is read as accepted, not as lost", 
     expect(res.failed).toHaveLength(0);
     expect(lines).toHaveLength(0);
   }
+});
+
+// N-7 (re-review): `perItemStatuses` is exported with a comment saying it is
+// exported *so it can be tested directly*, and nothing imported it. Either the
+// export is dead public surface or the direct test is missing -- this is the
+// direct test, and it pins the three-way return contract the sender branches
+// on, which the end-to-end tests above only exercise indirectly.
+test("perItemStatuses distinguishes no verdict, an untrustworthy list, and real verdicts", () => {
+  const pairs = (...codes) => JSON.stringify({ responses: codes.map((c) => [{ data: {} }, c]) });
+
+  // No per-item information at all -> null. Never read as failure.
+  expect(perItemStatuses("", 3)).toBeNull();
+  expect(perItemStatuses("not json", 3)).toBeNull();
+  expect(perItemStatuses("<html>502</html>", 3)).toBeNull();
+  expect(perItemStatuses("{}", 3)).toBeNull();
+  expect(perItemStatuses(JSON.stringify({ responses: [] }), 3)).toBeNull();
+  expect(perItemStatuses(JSON.stringify({ responses: "nope" }), 3)).toBeNull();
+
+  // A list that cannot be positional -> statuses withheld, length reported so
+  // the caller can say what it saw.
+  expect(perItemStatuses(pairs(201, 400), 3)).toEqual({ statuses: null, listed: 2 });
+  expect(perItemStatuses(pairs(201, 201, 201, 201), 3)).toEqual({ statuses: null, listed: 4 });
+
+  // Real verdicts, both wire shapes, positionally aligned.
+  expect(perItemStatuses(pairs(201, 400, 500), 3)).toEqual({ statuses: [201, 400, 500], listed: 3 });
+  expect(perItemStatuses(JSON.stringify({ responses: [201, 400, 500] }), 3)).toEqual({
+    statuses: [201, 400, 500],
+    listed: 3,
+  });
+  expect(perItemStatuses(JSON.stringify({ responses: ["201", " 400 "] }), 2)).toEqual({
+    statuses: [201, 400],
+    listed: 2,
+  });
+
+  // Unreadable entries stay null -- a verdict is never invented for a heartbeat
+  // nobody refused.
+  expect(perItemStatuses(JSON.stringify({ responses: [{ status: 400 }, true, "oops", 40.5] }), 4)).toEqual({
+    statuses: [null, null, null, null],
+    listed: 4,
+  });
 });
 
 const UA_ARGS = {

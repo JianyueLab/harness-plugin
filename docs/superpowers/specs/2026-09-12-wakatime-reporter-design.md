@@ -359,11 +359,37 @@ run. "Stop sending" reads a refused *request* as the endpoint pushing back on
 traffic; a 202 is the endpoint accepting the traffic and objecting to one row
 inside it.
 
-A body that carries no per-item verdict at all — not JSON, no `responses` key,
-an empty array, an entry that is not a `[body, status]` pair — is read as *no
-information*, i.e. accepted. A self-hosted wakapi or hakatime answering `202 {}`
-must not have everything it accepted reported as lost; the failure this reading
-exists to prevent is the opposite one.
+**Two wire shapes are read, not one.** The pair form `[<body>, 201]` is what
+`api.wakatime.com` returned. The flat form — `{"responses": [201, 400, …]}` — is
+what this section itself described before the per-item reading was implemented,
+which makes it the shape a self-hosted wakapi or hakatime built against that
+sentence would emit; reading only the observed form would leave those servers
+with every refusal counted as a delivery. Codes arriving as numeric strings are
+read as codes in either shape. Anything else in an entry position — an object, a
+boolean, a non-numeric string — yields no verdict for that position, because
+guessing at an unknown shape is how a "refusal" gets invented for a heartbeat
+nobody refused.
+
+Two readings deliberately count the batch as accepted:
+
+- **No per-item verdict at all** — not JSON, no `responses` key, an empty array.
+  A self-hosted server answering `202 {}` must not have everything it accepted
+  reported as lost; the failure this reading exists to prevent is the opposite
+  one. Silent, because there is nothing to report.
+- **A `responses` list whose length does not match the batch.** A short or long
+  list is proof that this server's verdicts are not positional, so applying them
+  by index would drop or respool the *wrong* heartbeat while the counts still
+  looked right. **This one is logged** — the wrong heartbeat silently punished
+  is worse than a loud "I could not read this".
+
+**Server text in the log is bounded and key-free.** Per-item lines carry counts
+by code and no body at all. The whole-request line keeps the body, because for a
+misconfigured self-hosted `api_url` it is the only diagnosis there is — but it
+is flattened to one line (a body full of newlines could otherwise forge entries
+in a one-line-per-event log), capped at 200 characters (the log rotates at
+256 KB; one HTML error page could push every real line out of it), and the API
+key is redacted out of it. "The key is never logged" has no exception for text
+somebody else wrote into our input.
 
 401 spools rather than drops because a revoked or mistyped key is a
 configuration problem someone will fix, and the hours behind it are worth
@@ -533,6 +559,15 @@ jyl-wakatime 0.1.0
   auth fails  0
 ```
 
+`accepted` counts what WakaTime said it **kept**, never what was handed over.
+A run that had heartbeats refused outright gains a third number —
+`accepted 2, failed 0, rejected 1` — which appears **only when it is non-zero**,
+so a healthy run's line is exactly the one above. Without it, the common
+per-item case (WakaTime refuses individual heartbeats on content, so a partial
+refusal is the ordinary shape) rendered as a completely healthy line while a
+heartbeat had been dropped for good: `accepted 2, failed 0`, empty spool, no
+`PROBLEM`, and no rule anywhere letting a reader notice.
+
 | What happened | What the tool does |
 |---|---|
 | no key anywhere | log once, exit 0, `--status` says "no API key configured" |
@@ -593,11 +628,16 @@ jyl-wakatime 0.1.0
     reporting no model at all; no model means no token rather than a literal
     `undefined`. The UA stays exactly six tokens whatever the model contains,
     and **is always a legal header value**: a model name carrying anything
-    outside printable ASCII reports no model rather than a mangled bucket, since
-    `fetch` refuses a header holding a codepoint above U+00FF and that throw is
-    indistinguishable from a network error — every heartbeat back to the spool,
-    every run, with nothing naming the cause. Model ids come from the user's own
-    `config.toml`, so this is reachable.
+    outside printable ASCII reports no model rather than a mangled bucket. Two
+    different reasons, and conflating them misleads exactly one user:
+    a codepoint **above U+00FF** (`模型-5`) makes `fetch` throw, and that throw
+    is indistinguishable from a network error — every heartbeat back to the
+    spool, every run, with nothing naming the cause; a **latin1** name
+    (`café-5`) the header layer *does* accept, measured going out fine on both
+    runtimes, and it is dropped anyway because a bucket name whose reading
+    depends on the server's decoding is not the stable identifier this token
+    exists to be. Model ids come from the user's own `config.toml`, so both are
+    reachable.
 14. **`payload.model` actually reaches `userAgent()`.** Asserted on the `ctx`
     `runHook` builds, not on `userAgent` in isolation — dropping that one
     property is exactly the regression that silently restores the phantom
@@ -652,6 +692,28 @@ the second is only half settled, because no browser was reachable.**
    claude-plugin` while the working copy sits at `harness-plugin/`. That has to
    be reconciled before any pin can be committed; it is not this design's
    problem, but it is this change's blocker.
+5. **Parked, deliberately: with no coreutils on `PATH` at all, the launcher's
+   entry-point guard misdiagnoses "no runtime".** `PATH=/nonexistent` leaves no
+   `dirname`, so `ROOT` collapses to `/` and the guard fires first — the stderr
+   line reads `entry point missing at //src/wakatime/main.mjs` where it used to
+   read `no bun or node on PATH`. Both exit 0, and in that environment no log
+   can be written either (`mkdir` is gone too), so the whole consequence is one
+   line of stderr that harness discards. With any realistic `PATH` the message
+   is right and the log line lands. Recorded so it is not rediscovered as a
+   mystery; not worth code that runs on every hook invocation.
+6. **Parked, with the reason measured rather than assumed: reading the response
+   body on the success path is bounded by the request timeout.** `postBatch`
+   reads `res.text()` even on a `2xx`, because the per-item verdicts live in
+   that body — so a server that answers `202` and then stalls the body holds
+   `store.withLock` while it does. **`AbortSignal.timeout` covers the body
+   stream, not just the headers**: probed on both runtimes against a loopback
+   server that sends headers plus a partial body and never finishes, the read
+   threw at 1203 ms (bun 1.4.2) and 1206 ms (node v26.8.2) against a 1200 ms
+   signal, *after* the headers had arrived. So the real ceiling is the 10 s
+   `REQUEST_TIMEOUT_MS`, the same bound the request already had; the read then
+   fails, the text is empty, and the batch counts as accepted — which is
+   correct, since the server did accept it. A new worst case on the healthy
+   path, not an unbounded one.
 
 ## Verified against the real service (2026-09-13)
 

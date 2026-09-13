@@ -423,11 +423,20 @@ want to share, the file paths already are too; use `hide_file_names`, or do not
 install this.
 
 One kind of model name never reaches the dashboard: one written outside
-printable ASCII — a gateway alias in Chinese, say. The model slot lives in the
-User-Agent, and an HTTP header cannot carry those characters (`fetch` refuses
-the whole request), so such a name is reported as **no model** rather than
-quietly turning every send into a network error that respools forever.
-Everything else about those runs — files, project, branch, tokens — still goes.
+printable ASCII. Two different reasons, worth separating because they affect
+different people:
+
+- **A character above U+00FF** — a gateway alias in Chinese, say. The model slot
+  lives in the User-Agent, and an HTTP header genuinely cannot carry those:
+  `fetch` refuses the whole request. Reporting no model is what stops that from
+  turning every send into a "network error" that respools forever.
+- **An accented latin1 name like `café-5`** — which the header layer *would*
+  accept; this was measured, not assumed. It is dropped anyway, because this
+  token's whole job is to be a stable bucket name in your dashboard, and a byte
+  sequence whose reading depends on how the server decodes it is not one.
+
+Either way the run still reports everything else — files, project, branch,
+tokens — and the AI-model slot is simply empty rather than wrong.
 
 One caveat about those token counts: when a run's `outcome` is `"cancelled"`
 or `"error"` instead of `"ok"`, harness may not have finished accumulating
@@ -623,9 +632,9 @@ reports what the most recent attempt actually did — for example:
 |---|---|
 | `PROBLEM` | present at all → nothing is being sent right now; its text says why |
 | `spool` | heartbeats that failed on their most recent send attempt — a network error, a 429, a 5xx, or a 401/403 all land here — waiting for the next retry, either the next hook run or `--flush` (below). Should trend toward 0 across runs, not up. Capped at 5000 — past that, the oldest are dropped, logged as `spool overflow: dropped N oldest events` |
-| `last send` | `accepted N, failed M` from the most recent attempt; `failed` staying above 0 across several runs means something is wrong, not a fluke |
+| `last send` | `accepted N, failed M` from the most recent attempt; `failed` staying above 0 across several runs means something is wrong, not a fluke. A third number, `rejected K`, appears **only when it is non-zero**: those heartbeats were refused outright and dropped for good, so they are neither `accepted` nor coming back via the spool. Any `rejected` at all is worth a look at the log — a partially-refused run is otherwise indistinguishable from a perfectly healthy one |
 | `auth fails` | counts *consecutive runs that had something to send* and got a 401/403 back; a run that sends successfully, or fails for a different reason, resets it to 0 — but a run with nothing queued at all does neither, so a stale nonzero value can persist through a quiet gap. Nonzero means the key WakaTime saw the last time this tool actually tried to send was wrong or revoked |
-| `accepted 0` with an **empty spool and no `PROBLEM` line** | the dangerous healthy-looking reading. Two ways to get here, both meaning "everything went in the bin". **The whole request was refused** with a non-retryable 4xx (anything but 401/403/429) — `send.mjs` drops that batch for good, so it never reaches the spool. Not hypothetical: a mistyped path on a self-hosted wakapi/hakatime `api_url` produces exactly this. Or **the request was accepted and each heartbeat inside it was refused** — WakaTime answers `202` with a status per heartbeat, and a heartbeat rejected on content is dropped for the same reason. Either way the only trace is the log: `wakatime rejected 3 heartbeat(s), dropping: 400 bad request` for the whole-request case, `wakatime rejected 3 of 3 heartbeat(s) individually, dropping: 400 x3` for the per-item one. What `accepted` counts is heartbeats WakaTime said it **kept** — never heartbeats merely handed over — which is what makes this reading a signal at all |
+| `accepted 0` with an **empty spool and no `PROBLEM` line** | the dangerous healthy-looking reading. Two ways to get here, both meaning "everything went in the bin". **The whole request was refused** with a non-retryable 4xx (anything but 401/403/429) — `send.mjs` drops that batch for good, so it never reaches the spool. Not hypothetical: a mistyped path on a self-hosted wakapi/hakatime `api_url` produces exactly this. Or **the request was accepted and each heartbeat inside it was refused** — WakaTime answers `202` with a status per heartbeat, and a heartbeat rejected on content is dropped for the same reason. Either way `rejected N` now appears on the `last send` line — that is the tell, and it is the reason to read the log next: `wakatime rejected 3 heartbeat(s), dropping: 400 bad request` for the whole-request case, `wakatime rejected 3 of 3 heartbeat(s) individually, dropping: 400 x3` for the per-item one. What `accepted` counts is heartbeats WakaTime said it **kept** — never heartbeats merely handed over — which is what makes this reading a signal at all |
 
 The full log behind that summary is `~/.config/jyl-wakatime/log`, capped at
 256 KB — the same rotation `jyl-usage` uses, from the `src/core/store.mjs`

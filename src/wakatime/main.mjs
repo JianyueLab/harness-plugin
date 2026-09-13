@@ -154,7 +154,22 @@ export async function runHook({ store, stdinText, cfg, now, send = sendAll, harn
       // run where every batch failed must not render as "sent 12, failed 12"
       // on --status -- the word "sent" there would read as success.
       // tally.accepted is what WakaTime actually kept.
-      state.wakatimeLastSend = { at: now, accepted: tally.accepted ?? 0, failed: failed.length };
+      //
+      // `rejected` is the third of those three numbers and the one that used to
+      // be computed and thrown away here. Without it a partially-refused run --
+      // 3 heartbeats out, 1 dropped for good -- renders as `accepted 2,
+      // failed 0`, empty spool, no PROBLEM: not merely idle-looking but
+      // *healthy*-looking, with no rule anywhere letting a reader detect it.
+      // Per-item refusals are usually partial (WakaTime refuses individual
+      // heartbeats on content), so that is the common shape, not the corner. It
+      // renders only when non-zero, which is why every existing sample in the
+      // README and the spec -- all healthy runs -- stays literally correct.
+      state.wakatimeLastSend = {
+        at: now,
+        accepted: tally.accepted ?? 0,
+        failed: failed.length,
+        rejected: tally.rejected ?? 0,
+      };
       store.saveState(state);
     });
 
@@ -187,12 +202,17 @@ export function renderStatus({ store, cfg }) {
   const state = store.loadState();
   const spool = store.readSpool();
   const last = state.wakatimeLastSend;
+  // Only when it is non-zero: a healthy run's line stays exactly what every
+  // sample in the README and the spec shows, and the number appears precisely
+  // on the runs where its absence was the lie. `last` written before this
+  // existed has no `rejected` key at all, which reads the same as zero.
+  const rejected = last?.rejected ? `, rejected ${last.rejected}` : "";
   return [
     `jyl-wakatime ${VERSION}`,
     `  api url     ${cfg.apiUrl}`,
     `  api key     ${redactKey(cfg.apiKey)}   (from ${cfg.source ?? "nowhere"})`,
     `  spool       ${spool.length} heartbeat(s)`,
-    `  last send   ${last ? `${new Date(last.at).toISOString()}  accepted ${last.accepted}, failed ${last.failed}` : "never"}`,
+    `  last send   ${last ? `${new Date(last.at).toISOString()}  accepted ${last.accepted}, failed ${last.failed}${rejected}` : "never"}`,
     `  auth fails  ${state.wakatimeAuthFailures ?? 0}`,
     configProblem(cfg) ? `  PROBLEM     ${configProblem(cfg)}` : "",
   ]

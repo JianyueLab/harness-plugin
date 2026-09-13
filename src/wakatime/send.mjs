@@ -171,6 +171,33 @@ function verdictFor(status) {
 }
 
 /**
+ * One `responses` entry -> a status code, or `null` for "this position said
+ * nothing I can read".
+ *
+ * **Two wire shapes, because two are plausible and only one was observed.** The
+ * pair form `[<body>, 201]` is what `api.wakatime.com` actually returned (spec
+ * §5). The flat form `400` is what §Sending *said* before this round ("an array
+ * of per-item status codes"), which makes it exactly what someone implementing a
+ * self-hosted wakapi or hakatime against that sentence would emit. Reading only
+ * the observed one leaves those servers with the pre-fix bug intact — every
+ * refusal counted as a delivery — on a code path whose own comment tells the
+ * reader that silence is safe. Numeric strings are accepted for the same reason:
+ * `"400"` from a server that stringifies its codes is not ambiguous, it is just
+ * JSON being JSON.
+ *
+ * Anything else — an object, a boolean, a non-numeric string, a pair whose
+ * second element is none of the above — stays `null`. Guessing at an unknown
+ * shape is how a "verdict" gets invented for a heartbeat nobody refused.
+ */
+function toStatus(value) {
+  if (typeof value === "number") return Number.isInteger(value) ? value : null;
+  if (typeof value === "string" && /^\s*\d{3}\s*$/.test(value)) return Number(value.trim());
+  return null;
+}
+
+const entryStatus = (entry) => (Array.isArray(entry) ? toStatus(entry[1]) : toStatus(entry));
+
+/**
  * The per-item verdicts inside an accepted bulk response, positionally
  * aligned with the batch that was sent.
  *
@@ -180,16 +207,23 @@ function verdictFor(status) {
  * `{"responses": [[{"data": {"id": …}}, 201], …]}` — one `[body, status]` pair
  * per heartbeat, in the order they were sent, with the per-item code nested one
  * level deeper than §Sending's original "an array of per-item status codes"
- * suggested.
+ * suggested. `toStatus` above also reads that older, flatter shape.
  *
- * Returns an array of `number | null`, `null` meaning *this position carried no
- * verdict*, which the caller reads as accepted. Unreadable bodies (not JSON, no
- * `responses` key, an entry that is not a `[body, status]` pair) are "no
- * information", never failure: a self-hosted wakapi or hakatime answering
- * `202 {}` must not have every heartbeat it accepted reported as lost. The
- * failure this whole function exists to end is the opposite one — silently
- * counting a *rejection* as success — and that only needs the codes that are
- * actually there to be read.
+ * Three returns, because "no verdict" and "a verdict I do not trust" need
+ * different handling and only one of them deserves a log line:
+ *
+ *  - `null` — the body carried no per-item information at all (not JSON, no
+ *    `responses` key, an empty array). Not failure: a self-hosted server
+ *    answering `202 {}` must not have everything it accepted reported as lost.
+ *    The failure this function exists to end is the opposite one.
+ *  - `{ statuses: null, listed }` — `responses` was there but its length does
+ *    **not** match the batch. A short or long list is proof that this server's
+ *    verdicts are not positional, so applying them by index would drop or
+ *    respool the wrong heartbeat while the counts still looked right. The batch
+ *    is treated as accepted and the caller logs the mismatch: the wrong item
+ *    silently punished is worse than a loud "I could not read this".
+ *  - `{ statuses, listed }` — one entry per heartbeat, each `number | null`
+ *    (`null` = that position carried nothing readable, read as accepted).
  */
 export function perItemStatuses(bodyText, count) {
   let body;
@@ -200,13 +234,37 @@ export function perItemStatuses(bodyText, count) {
   }
   const responses = body?.responses;
   if (!Array.isArray(responses) || responses.length === 0) return null;
+  if (responses.length !== count) return { statuses: null, listed: responses.length };
 
-  const out = [];
-  for (let i = 0; i < count; i++) {
-    const entry = responses[i];
-    out.push(Array.isArray(entry) && typeof entry[1] === "number" ? entry[1] : null);
-  }
-  return out;
+  return { statuses: responses.map(entryStatus), listed: responses.length };
+}
+
+/** Longest run of server-supplied text this tool will put in its own log. */
+const MAX_LOGGED_BODY = 200;
+
+/**
+ * A server's response body, made safe to log.
+ *
+ * The per-item path logs codes only and no body at all. The whole-request path
+ * keeps the body, because for a misconfigured self-hosted `api_url` it is the
+ * only diagnosis there is (`dropping: 400 bad request` is the README's own
+ * example) — but "keep it" cannot mean "interpolate whatever arrives":
+ *
+ *  - **The key can never ride along.** A server that echoes the request back in
+ *    an error payload would otherwise put `Authorization` in this tool's log,
+ *    and "the key is never logged" is absolute — it does not have an exception
+ *    for "someone else wrote it into my input".
+ *  - **One line.** A body full of newlines could otherwise forge entries in a
+ *    log whose format is one timestamped line per event.
+ *  - **Bounded.** The log rotates at 256 KB; a single HTML error page could
+ *    push every real line out of it, which is the same silence this tool exists
+ *    to prevent.
+ */
+function safeBody(ctx, text) {
+  let out = String(text ?? "");
+  if (ctx.apiKey) out = out.split(ctx.apiKey).join("…");
+  out = out.replace(/\s+/g, " ").trim();
+  return out.length > MAX_LOGGED_BODY ? `${out.slice(0, MAX_LOGGED_BODY)}… (${out.length} chars)` : out;
 }
 
 /** `[400, 400, 503]` -> `"400 x2, 503 x1"`. Codes only: no response bodies. */
@@ -242,7 +300,7 @@ async function postBatch(ctx, batch) {
   // individually-rejected heartbeats used to be counted as delivered.
   const text = await res.text().catch(() => "");
 
-  if (res.ok) return { ok: true, statuses: perItemStatuses(text, batch.length) };
+  if (res.ok) return { ok: true, perItem: perItemStatuses(text, batch.length) };
 
   // 401/403 retries for the same reason upload.mjs spools them: a revoked or
   // mistyped key is a configuration problem someone will fix, and the hours
@@ -276,15 +334,26 @@ export async function sendAll(ctx, beats) {
       // all -- measured against a fake service answering 202 with a 400 for
       // every item: `spool 0, accepted 3, failed 0`, no PROBLEM, no log file.
       // Every indicator healthy, every heartbeat gone.
-      if (!result.statuses) {
+      if (!result.perItem) {
         tally.accepted += batch.length;
+        continue;
+      }
+      // A `responses` list whose length does not match the batch is not a
+      // verdict list -- see perItemStatuses. Logged rather than applied, so the
+      // server's disagreement with the protocol is visible instead of costing
+      // some arbitrary heartbeat.
+      if (!result.perItem.statuses) {
+        tally.accepted += batch.length;
+        ctx.log(
+          `wakatime: bulk response listed ${result.perItem.listed} per-item result(s) for a batch of ${batch.length}; ignoring them and counting the batch as accepted`,
+        );
         continue;
       }
 
       const dropped = [];
       const deferred = [];
       for (let j = 0; j < batch.length; j++) {
-        const status = result.statuses[j];
+        const status = result.perItem.statuses[j];
         // A position the response said nothing about is accepted: see
         // perItemStatuses on why silence is not failure.
         const verdict = status === null ? "ok" : verdictFor(status);
@@ -322,13 +391,13 @@ export async function sendAll(ctx, beats) {
     }
     if (!result.retry) {
       tally.rejected += batch.length;
-      ctx.log(`wakatime rejected ${batch.length} heartbeat(s), dropping: ${result.status} ${result.message}`);
+      ctx.log(`wakatime rejected ${batch.length} heartbeat(s), dropping: ${result.status} ${safeBody(ctx, result.message)}`);
       continue;
     }
 
     failed.push(...batch);
     if (result.auth) authFailed = true;
-    ctx.log(`wakatime send failed (will retry): ${result.status ?? "network"} ${result.message}`);
+    ctx.log(`wakatime send failed (will retry): ${result.status ?? "network"} ${safeBody(ctx, result.message)}`);
 
     // A 429 means the whole run should stop, not just this batch — WakaTime
     // allows under 10 req/s averaged over five minutes, and hammering it with

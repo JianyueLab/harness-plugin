@@ -333,6 +333,118 @@ test("M3: the config-problem line logs once, then again after a fix and a fresh 
   expect(notReportingLines()).toBe(2); // fresh line after the fix-then-break cycle
 });
 
+// --- Fix round 2 (re-review: task-5-rereview.md) --------------------------
+
+// M3 follow-up (re-review defect): the config-problem flag's read-modify-write
+// used to run *outside* store.withLock -- the one and only place in this file
+// that touched state.json unlocked. Every hook invocation is a separate OS
+// process, so this was a real inter-process race: the re-review built a
+// deterministic repro where an unlocked "problem" read+write, ordered after a
+// concurrent locked run's own save, clobbered that run's freshly-written
+// wakatimeLastSend and throttle table with a stale snapshot. This test proves
+// the read-modify-write is now structurally inside the lock: it wraps
+// loadState/saveState to throw if either is ever called while withLock's own
+// callback is not currently running, which would surface (caught by runHook's
+// outermost net, so also asserted for below) if the fix regressed.
+test("M3 follow-up: the config-problem flag's read-modify-write happens inside store.withLock", async () => {
+  const real = freshStore("rmwInsideLock");
+  let locked = false;
+  const store = {
+    ...real,
+    withLock: async (fn) => {
+      locked = true;
+      try {
+        await fn();
+      } finally {
+        locked = false;
+      }
+      return true;
+    },
+    loadState: (...args) => {
+      if (!locked) throw new Error("loadState called outside store.withLock");
+      return real.loadState(...args);
+    },
+    saveState: (...args) => {
+      if (!locked) throw new Error("saveState called outside store.withLock");
+      return real.saveState(...args);
+    },
+  };
+
+  await runHook({ store, stdinText: "", cfg: { apiKey: "", apiUrl: "https://x/api/v1", enabled: true }, now: 1_000 });
+
+  // If the guarded loadState/saveState above had thrown, runHook's own
+  // outermost catch would have swallowed it silently -- so also confirm the
+  // flag actually landed, proving the guarded calls really ran rather than
+  // having been skipped entirely.
+  expect(real.loadState().wakatimeConfigProblemLogged).toBe(true);
+  expect(fs.readFileSync(real.logFile, "utf8")).toContain("not reporting");
+});
+
+// M3 follow-up (ruling): when the lock is contended, the flag must not be
+// written and the line must not be logged -- losing one "not reporting" line
+// costs nothing; writing state.json from a stale unlocked read is what
+// clobbered another run's real bookkeeping.
+test("M3 follow-up: a contended lock on the config-problem path writes nothing and logs nothing", async () => {
+  const real = freshStore("problemContended");
+  let withLockCalls = 0;
+  const store = { ...real, withLock: async () => { withLockCalls++; return false; } };
+
+  await runHook({ store, stdinText: "", cfg: { apiKey: "", apiUrl: "https://x/api/v1", enabled: true }, now: 1_000 });
+
+  expect(withLockCalls).toBe(1); // the problem path now goes through the lock at all
+  expect(fs.existsSync(real.stateFile)).toBe(false); // nothing was ever saved
+  expect(fs.existsSync(real.logFile)).toBe(false); // nothing was ever logged
+});
+
+function which(cmd) {
+  const r = spawnSync("sh", ["-c", `command -v ${cmd}`]);
+  return r.status === 0 ? r.stdout.toString().trim() : null;
+}
+
+// C1 follow-up (re-review: "partially addressed"): the stdin-drain loop in
+// the top-level entry point -- which runs *before* main() is ever called --
+// had no net of its own, unlike main()'s own --status/render path. The
+// re-review reproduced an uncaught EISDIR on the default --hook path, under
+// the default runtime (bun), by piping a directory in as stdin. Node's stdin
+// implementation does not throw on the same input, so this is verified under
+// both runtimes scripts/wakatime supports -- their disagreement is exactly
+// why the review asked for both.
+for (const [name, runtimePath] of Object.entries({ bun: which("bun"), node: which("node") })) {
+  test(`C1 follow-up (${name}): a directory piped in as stdin on the --hook path still exits 0`, () => {
+    expect(runtimePath).toBeTruthy(); // this repo requires both runtimes present
+    const fakeHome = path.join(root, `c1-stdin-${name}`);
+    const aDir = path.join(fakeHome, "adir");
+    fs.mkdirSync(aDir, { recursive: true });
+    const launcher = path.join(import.meta.dir, "..", "scripts", "wakatime");
+
+    const result = spawnSync("sh", ["-c", `'${launcher}' --hook < '${aDir}'`], {
+      env: { ...process.env, HOME: fakeHome, JYL_WAKATIME_RUNTIME: runtimePath },
+    });
+
+    expect(result.status).toBe(0);
+  });
+}
+
+// Confirms bun is the runtime that actually throws here (and that the entry
+// point's own catch, not some unrelated success, is what produced exit 0
+// above) -- without this, "exit 0" alone would not distinguish "caught the
+// error" from "never hit the bug in the first place."
+test("C1 follow-up: bun's own throw on directory-stdin is the one actually caught and logged", () => {
+  const bunPath = which("bun");
+  expect(bunPath).toBeTruthy();
+  const fakeHome = path.join(root, "c1-stdin-bun-logcheck");
+  const aDir = path.join(fakeHome, "adir");
+  fs.mkdirSync(aDir, { recursive: true });
+  const launcher = path.join(import.meta.dir, "..", "scripts", "wakatime");
+
+  spawnSync("sh", ["-c", `'${launcher}' --hook < '${aDir}'`], {
+    env: { ...process.env, HOME: fakeHome, JYL_WAKATIME_RUNTIME: bunPath },
+  });
+
+  const log = fs.readFileSync(path.join(fakeHome, ".config", "jyl-wakatime", "log"), "utf8");
+  expect(log).toContain("unexpected failure reading stdin");
+});
+
 // M4 (Minor): main's --status branch wrote to the real process.stdout with no
 // assertion on what it wrote -- exercised without being checked.
 test("M4: main's --status branch writes renderStatus's own text to stdout", async () => {

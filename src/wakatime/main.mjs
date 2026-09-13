@@ -39,17 +39,27 @@ export async function runHook({ store, stdinText, cfg, now, send = sendAll, harn
     const problem = configProblem(cfg);
     if (problem) {
       // Logged once, not on every run (spec: "no key anywhere | log once,
-      // exit 0"). The flag lives in state.json, which is already open on this
-      // path, so this costs no new I/O surface. It is cleared the moment the
-      // config is valid again (below, inside withLock), so a user who fixes
-      // their config and later breaks it again gets one fresh line rather
-      // than permanent silence.
-      const state = store.loadState();
-      if (!state.wakatimeConfigProblemLogged) {
-        store.log(`not reporting: ${problem}`);
-        state.wakatimeConfigProblemLogged = true;
-        store.saveState(state);
-      }
+      // exit 0"). The read-modify-write of this flag MUST happen inside
+      // store.withLock, like every other write to state.json in this file --
+      // that lock is the file's only concurrency rule, and this path used to
+      // be the one exception, which reproducibly clobbered a concurrent
+      // locked run's freshly-saved bookkeeping (wakatimeLastSend, the
+      // throttle table) with a stale unlocked overwrite. If the lock is not
+      // free, skip the flag and skip the log line entirely rather than write
+      // unlocked: losing one "not reporting" line under contention costs
+      // nothing; overwriting someone else's real accounting is real data
+      // loss. It is cleared the moment the config is valid again (below,
+      // inside its own withLock call), so a user who fixes their config and
+      // later breaks it again still gets one fresh line, not permanent
+      // silence.
+      await store.withLock(async () => {
+        const state = store.loadState();
+        if (!state.wakatimeConfigProblemLogged) {
+          store.log(`not reporting: ${problem}`);
+          state.wakatimeConfigProblemLogged = true;
+          store.saveState(state);
+        }
+      });
       return;
     }
 
@@ -224,20 +234,45 @@ export async function main(argv, stdinText, overrides = {}) {
 }
 
 if (import.meta.main ?? process.argv[1]?.endsWith("main.mjs")) {
-  const argv = process.argv.slice(2);
-  const { command } = parseArgs(argv);
-  // Read stdin only for the hook path, and never at all on a real terminal.
-  // --status and --flush do not need it, and draining stdin to EOF before
-  // even looking at argv is what made --status hang at an interactive prompt.
-  let stdinText = "";
-  if (command !== "--status" && command !== "--flush" && !process.stdin.isTTY) {
-    const chunks = [];
-    for await (const c of process.stdin) chunks.push(c);
-    stdinText = Buffer.concat(chunks).toString("utf8");
-  }
-  // main() itself never rejects (see its own try/catch above); this .catch is
-  // a defense-in-depth backstop for the top level, not a path expected to fire.
-  main(argv, stdinText)
-    .then((code) => process.exit(code))
-    .catch(() => process.exit(0));
+  // An IIFE, not a bare top-level block: reading stdin below can itself throw
+  // (a directory piped in as stdin fails at fstat under Bun's stream
+  // implementation) on a path main()'s own try/catch never sees, since that
+  // read happens before main() is even called. Wrapping it needs an early
+  // `return` on the error path, which only a function body allows at this
+  // scope; a bare `if` cannot express "stop here" without one.
+  (async () => {
+    const argv = process.argv.slice(2);
+    const { command } = parseArgs(argv);
+    let stdinText = "";
+    try {
+      // Read stdin only for the hook path, and never at all on a real
+      // terminal. --status and --flush do not need it, and draining stdin to
+      // EOF before even looking at argv is what made --status hang at an
+      // interactive prompt.
+      if (command !== "--status" && command !== "--flush" && !process.stdin.isTTY) {
+        const chunks = [];
+        for await (const c of process.stdin) chunks.push(c);
+        stdinText = Buffer.concat(chunks).toString("utf8");
+      }
+    } catch (err) {
+      // Same "entry point has no net" class main()'s try/catch already
+      // closed for --status's render path -- the stdin-read path needs the
+      // identical treatment, not a special case. No store exists yet on this
+      // path (main() hasn't run), so build one just for this log line.
+      try {
+        createStore(STATE_DIR).log(`unexpected failure reading stdin: ${err?.stack ?? err}`);
+      } catch {
+        /* logging must never be the thing that breaks this */
+      }
+      process.exit(0);
+      return;
+    }
+
+    // main() itself never rejects (see its own try/catch above); this .catch
+    // is a defense-in-depth backstop for the top level, not a path expected
+    // to fire.
+    await main(argv, stdinText)
+      .then((code) => process.exit(code))
+      .catch(() => process.exit(0));
+  })();
 }

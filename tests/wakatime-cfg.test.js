@@ -211,17 +211,43 @@ test("D-3: expandTilde never throws on a non-string, returns it unchanged", () =
 
 // Fix round 2 / D-2: quoting or escaping a `~` does NOT suppress expansion
 // the way it would in a real shell -- splitVaultCmd's quote removal already
-// happened by the time expandTilde sees the token, so `"~"`, `'~'`, and
-// `\~` are indistinguishable from a bare `~`. Documented as a deliberate
-// limitation (not "shell-faithful" on this one point), not a bug: there is
-// no escape sequence that survives to produce a literal `~` in an argument.
+// happened by the time expandTilde sees the token, so `"~"`, `'~'`, and a
+// backslash-escaped `~` are indistinguishable from a bare `~`. Documented
+// as a deliberate limitation (not "shell-faithful" on this one point), not
+// a bug: there is no escape sequence that survives to produce a literal `~`
+// in an argument.
+//
+// Fix round 3: the fourth case below used to be written `"\~"` -- a single
+// backslash before `~` is not a recognised JS escape, so the *source code*
+// silently evaluated to the one-character string `"~"`, identical to the
+// bare-tilde case two lines above it. The real two-character string `\~`
+// requires `"\\~"` in JS source. That bug meant this test never actually
+// exercised splitVaultCmd's backslash-escape handling at all -- confirmed
+// by mutation: breaking that handling left this test green. Each of the
+// four literals is asserted to have the length a human typing that form
+// would expect, specifically so a future edit like this one fails loudly
+// on the string itself rather than silently testing the same case twice.
 test("D-2: quoting or escaping a ~ does not suppress expansion -- there is no way to get a literal ~", () => {
   const home = os.homedir();
   const expand = (cmd) => splitVaultCmd(cmd).map(expandTilde);
-  expect(expand("~")).toEqual([home]); // the ordinary unquoted case, for contrast
-  expect(expand('"~"')).toEqual([home]);
-  expect(expand("'~'")).toEqual([home]);
-  expect(expand("\~")).toEqual([home]);
+
+  const bare = "~";
+  const doubleQuoted = '"~"';
+  const singleQuoted = "'~'";
+  const backslashEscaped = "\\~"; // two source characters: backslash, tilde
+
+  // Guards the guard: if any of these four literals ever collapses onto
+  // another (the exact failure mode this round fixed), fail here first
+  // with a clear "these aren't four distinct inputs" signal, rather than
+  // deep inside a passing assertion that silently tested fewer cases than
+  // it claimed to.
+  expect(new Set([bare, doubleQuoted, singleQuoted, backslashEscaped]).size).toBe(4);
+  expect(backslashEscaped.length).toBe(2);
+
+  expect(expand(bare)).toEqual([home]); // the ordinary unquoted case, for contrast
+  expect(expand(doubleQuoted)).toEqual([home]);
+  expect(expand(singleQuoted)).toEqual([home]);
+  expect(expand(backslashEscaped)).toEqual([home]);
 });
 
 test("execVaultCmd returns { key, problem: null } on success, from a real (fake) command", () => {

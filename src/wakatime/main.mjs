@@ -36,8 +36,20 @@ export function parseArgs(argv) {
  */
 export async function runHook({ store, stdinText, cfg, now, send = sendAll, harnessVersion = "unknown", runGit }) {
   try {
-    if (configProblem(cfg)) {
-      store.log(`not reporting: ${configProblem(cfg)}`);
+    const problem = configProblem(cfg);
+    if (problem) {
+      // Logged once, not on every run (spec: "no key anywhere | log once,
+      // exit 0"). The flag lives in state.json, which is already open on this
+      // path, so this costs no new I/O surface. It is cleared the moment the
+      // config is valid again (below, inside withLock), so a user who fixes
+      // their config and later breaks it again gets one fresh line rather
+      // than permanent silence.
+      const state = store.loadState();
+      if (!state.wakatimeConfigProblemLogged) {
+        store.log(`not reporting: ${problem}`);
+        state.wakatimeConfigProblemLogged = true;
+        store.saveState(state);
+      }
       return;
     }
 
@@ -49,6 +61,15 @@ export async function runHook({ store, stdinText, cfg, now, send = sendAll, harn
         store.log(`stdin was not JSON: ${err.message}`);
         return;
       }
+      // Valid JSON but not the object harness always sends (bare `null`, a
+      // number, a string...). `null.event` throws, and that thrown TypeError
+      // would otherwise land in the outermost catch below and log as
+      // "unexpected failure" -- indistinguishable from a real bug in this
+      // tool. Malformed input is not that.
+      if (!payload || typeof payload !== "object") {
+        store.log(`stdin was not a JSON object: ${stdinText.slice(0, 200)}`);
+        return;
+      }
       // Forward compatibility: a harness that grows more events must not make
       // this tool log an error on every one of them.
       if (payload.event !== EVENT) {
@@ -57,7 +78,7 @@ export async function runHook({ store, stdinText, cfg, now, send = sendAll, harn
       }
     }
 
-    await store.withLock(async () => {
+    const ran = await store.withLock(async () => {
       // The throttle table (`wakatimeSeen`) and the project/branch cache
       // (`wakatimeProjects`) both live inside jyl-usage's own state object.
       // `store.loadState()` returns extra keys untouched as long as its own
@@ -66,6 +87,10 @@ export async function runHook({ store, stdinText, cfg, now, send = sendAll, harn
       // STATE_VERSION, this throttle table resets silently; the cost is one
       // extra batch of heartbeats, which is acceptable.
       const state = store.loadState();
+      // Reaching this line means configProblem(cfg) was falsy above: the
+      // config is valid on this run, so reset the once-only log flag for the
+      // next time it breaks.
+      state.wakatimeConfigProblemLogged = false;
       let fresh = [];
 
       if (payload) {
@@ -109,6 +134,21 @@ export async function runHook({ store, stdinText, cfg, now, send = sendAll, harn
       state.wakatimeLastSend = { at: now, accepted: tally.accepted ?? 0, failed: failed.length };
       store.saveState(state);
     });
+
+    if (!ran) {
+      // Another run holds the lock. Unlike jyl-usage, there is nothing to
+      // re-read afterwards -- this payload existed only on stdin -- so
+      // whatever heartbeats it would have produced are gone, not merely
+      // delayed. Spooling them here is not safe (writeSpool is a whole-file
+      // rewrite, unsafe without the lock), so logging an honest count is the
+      // right minimal remedy. The count comes from the pre-throttle
+      // heartbeatsFrom() output, computed without touching state -- state is
+      // exactly what we could not safely reach without the lock. Throttling
+      // only ever removes entries, so this is an upper bound on what was
+      // actually lost, never an undercount.
+      const dropped = payload ? heartbeatsFrom(payload, { hideFileNames: cfg.hideFileNames }).length : 0;
+      store.log(`another run held the lock; dropped ${dropped} fresh heartbeat(s)`);
+    }
   } catch (err) {
     // The outermost net. Anything that got here is a bug, but the hook still
     // has to come back clean.
@@ -140,25 +180,64 @@ export function renderStatus({ store, cfg }) {
 /**
  * `overrides.store` and `overrides.cfg` replace the real store and config.
  * Tests always supply both, so a run never touches the developer's real
- * `~/.wakatime.cfg` or creates a real `~/.config/jyl-wakatime/`. Production
- * (the entry point below) calls this with no overrides at all.
+ * `~/.wakatime.cfg` or creates a real `~/.config/jyl-wakatime/`. `overrides.send`
+ * additionally replaces `runHook`'s network call, for tests that need to
+ * observe what `main()` itself does with stdin (e.g. `--flush` discarding it)
+ * without going over the network. Production (the entry point below) calls
+ * this with no overrides at all.
+ *
+ * Resolves to 0 on every path, never rejects -- see the try/catch below.
  */
 export async function main(argv, stdinText, overrides = {}) {
   const { command } = parseArgs(argv);
   const cfg = overrides.cfg ?? loadWakaConfig({});
   const store = overrides.store ?? createStore(STATE_DIR);
 
-  if (command === "--status") {
-    process.stdout.write(renderStatus({ store, cfg }) + "\n");
+  try {
+    if (command === "--status") {
+      process.stdout.write(renderStatus({ store, cfg }) + "\n");
+      return 0;
+    }
+    // --flush is --hook with nothing on stdin: it drains whatever is spooled.
+    await runHook({
+      store,
+      stdinText: command === "--flush" ? "" : stdinText,
+      cfg,
+      now: Date.now(),
+      ...(overrides.send ? { send: overrides.send } : {}),
+    });
+    return 0;
+  } catch (err) {
+    // main()'s own net. `runHook` never throws, but `renderStatus` has no net
+    // of its own -- `store.readSpool()` on an unwritable state dir throws
+    // straight through it -- and `--status` is the one surface whose entire
+    // job is making this tool's silence visible. It must not turn a bad state
+    // dir into an uncaught rejection there. Mirrors `reporter.mjs`'s identical
+    // `main().catch(...)` net for the sibling tool's version of this rule.
+    try {
+      store.log(`unexpected failure in main: ${err?.stack ?? err}`);
+    } catch {
+      /* logging must never be the thing that breaks this */
+    }
     return 0;
   }
-  // --flush is --hook with nothing on stdin: it drains whatever is spooled.
-  await runHook({ store, stdinText: command === "--flush" ? "" : stdinText, cfg, now: Date.now() });
-  return 0;
 }
 
 if (import.meta.main ?? process.argv[1]?.endsWith("main.mjs")) {
-  const chunks = [];
-  for await (const c of process.stdin) chunks.push(c);
-  process.exit(await main(process.argv.slice(2), Buffer.concat(chunks).toString("utf8")));
+  const argv = process.argv.slice(2);
+  const { command } = parseArgs(argv);
+  // Read stdin only for the hook path, and never at all on a real terminal.
+  // --status and --flush do not need it, and draining stdin to EOF before
+  // even looking at argv is what made --status hang at an interactive prompt.
+  let stdinText = "";
+  if (command !== "--status" && command !== "--flush" && !process.stdin.isTTY) {
+    const chunks = [];
+    for await (const c of process.stdin) chunks.push(c);
+    stdinText = Buffer.concat(chunks).toString("utf8");
+  }
+  // main() itself never rejects (see its own try/catch above); this .catch is
+  // a defense-in-depth backstop for the top level, not a path expected to fire.
+  main(argv, stdinText)
+    .then((code) => process.exit(code))
+    .catch(() => process.exit(0));
 }

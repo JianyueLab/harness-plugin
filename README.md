@@ -438,6 +438,7 @@ Two values, resolved in this order — first match wins:
 ```text
 api key:  WAKATIME_API_KEY
        -> ~/.wakatime.cfg  [settings] api_key
+       -> ~/.wakatime.cfg  [settings] api_key_vault_cmd  (output of the command)
        -> ~/.config/jyl-wakatime/config.json  { "apiKey": … }
 
 api url:  WAKATIME_API_URL
@@ -459,11 +460,32 @@ to drift, since nothing else would notice if they did.
 **`~/.wakatime.cfg` is checked before this tool's own config, deliberately:**
 anyone who has ever installed a WakaTime editor plugin already has a key
 there, and asking for a second copy of the same secret would be asking for
-it to drift. Only `[settings]`'s `api_key`, `api_url` and `hide_file_names`
-are read from that file; everything else in it (`exclude`, `include`,
-`proxy`, …) is `wakatime-cli`'s business, and unrecognised lines are ignored
-rather than rejected — a future WakaTime release adding a line this tool has
-never heard of will not break it.
+it to drift. Only `[settings]`'s `api_key`, `api_key_vault_cmd`, `api_url` and
+`hide_file_names` are read from that file; everything else in it (`exclude`,
+`include`, `proxy`, …) is `wakatime-cli`'s business, and unrecognised lines
+are ignored rather than rejected — a future WakaTime release adding a line
+this tool has never heard of will not break it.
+
+**`api_key_vault_cmd` is for a key kept in a password manager instead of in
+plaintext** — the same option `wakatime-cli` itself supports, so an existing
+editor plugin's config Just Works here too. Its value is a command; **this
+tool runs it and treats whatever it prints on stdout, trimmed, as the key.**
+It is split into a command and arguments the way a shell would (quotes and
+backslash escapes are understood), but it is never handed to an actual
+shell — no pipes, no `$VAR` expansion, no `; second-command`. If both
+`api_key` and `api_key_vault_cmd` are present, `api_key` wins and the command
+never runs.
+
+The command gets 5 seconds. If it is missing, exits non-zero, times out, or
+prints nothing at all, **that is indistinguishable from having no key
+configured** — same silent no-op, same one-line log, same `--status` output
+as an empty config. Nothing about *why* the command failed is logged,
+including its stderr: a vault command's failure output is exactly the kind
+of place a key, a passphrase prompt, or other secret-shaped text could leak,
+so it is discarded unread rather than risk that. When it does succeed,
+`--status` attributes the key to `api_key_vault_cmd`, not to
+`~/.wakatime.cfg`'s path, so a key resolved this way is visibly different
+from one written in plaintext (see below).
 
 Self-hosted **wakapi** or **hakatime**: point `api_url` at it, in either file
 above. A trailing slash is trimmed.

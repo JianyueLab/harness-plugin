@@ -60,6 +60,24 @@ test("the lock keeps a second run out and is released afterwards", async () => {
   expect(await store.withLock(async () => {})).toBe(true);
 });
 
+test("a stale lock can be reclaimed, and a replaced lock is never removed by the old owner", async () => {
+  const store = fresh("stale-lock");
+  fs.mkdirSync(store.dir, { recursive: true });
+  fs.writeFileSync(store.lockFile, "dead-pid");
+  const old = new Date(Date.now() - 120_000);
+  fs.utimesSync(store.lockFile, old, old);
+
+  expect(await store.withLock(async () => {})).toBe(true);
+  expect(fs.existsSync(store.lockFile)).toBe(false);
+
+  await store.withLock(async () => {
+    fs.unlinkSync(store.lockFile);
+    fs.writeFileSync(store.lockFile, "new-owner");
+  });
+  expect(fs.readFileSync(store.lockFile, "utf8")).toBe("new-owner");
+  fs.unlinkSync(store.lockFile);
+});
+
 test("two stores in different directories do not share anything", () => {
   const a = fresh("hostA");
   const b = fresh("hostB");

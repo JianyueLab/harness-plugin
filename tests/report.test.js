@@ -85,6 +85,31 @@ test("retries the spool on the next pass", async () => {
   expect(store.readSpool()).toHaveLength(0);
 });
 
+test("retries too_many_new_models events even after their keys enter the dedup window", async () => {
+  let attempt = 0;
+  globalThis.fetch = async () => {
+    attempt += 1;
+    if (attempt === 1) {
+      return new Response(JSON.stringify({
+        accepted: 0,
+        duplicates: 0,
+        rejected: [{ index: 0, reason: "too_many_new_models" }],
+      }), { status: 200 });
+    }
+    return new Response(JSON.stringify({ accepted: 1, duplicates: 0, rejected: [] }), { status: 200 });
+  };
+  const host = fakeHost({ u1: [event("model-late")] });
+  const store = createStore(host.stateDir);
+
+  const first = await report(host, store, config, ["u1"], {});
+  expect(first.spooled).toBe(1);
+  expect(store.readSeen()).toEqual(["model-late"]);
+
+  const second = await report(host, store, config, [], {});
+  expect(second.accepted).toBe(1);
+  expect(store.readSpool()).toEqual([]);
+});
+
 test("the sweep picks up a tracked unit nobody named", async () => {
   globalThis.fetch = ok({ accepted: 1, duplicates: 0, rejected: [] });
   const host = fakeHost({ u1: [event("z")] });

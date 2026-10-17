@@ -66,6 +66,18 @@ test("spools a 400 whose error.code is invalid_source, even when the message is 
   expect(tally.spooled).toBe(3);
 });
 
+test("spools events rejected as too_many_new_models for a later retry", async () => {
+  globalThis.fetch = async () => new Response(JSON.stringify({
+    accepted: 1,
+    duplicates: 0,
+    rejected: [{ index: 1, reason: "too_many_new_models" }],
+  }), { status: 200 });
+
+  const { failed, tally } = await upload(ctx, events(3));
+  expect(failed.map((e) => e.requestId)).toEqual(["r1"]);
+  expect(tally.spooled).toBe(1);
+});
+
 test("spools a 400 with today's prose message but no error.code, via the fallback match", async () => {
   // An older portal build whose response predates the `code` field.
   const body = JSON.stringify({

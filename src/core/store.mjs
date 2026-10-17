@@ -23,6 +23,8 @@ const SEEN_COMPACT_AT = 4_500;
 /** Spool ceiling. Past this the portal has been unreachable for a very long time. */
 const MAX_SPOOL_EVENTS = 5_000;
 const MAX_LOG_BYTES = 256 * 1024;
+const LOCK_STALE_MS = 60_000;
+const LOCK_HEARTBEAT_MS = 10_000;
 /** Bump when `state.json`'s shape changes; `loadState` migrates anything older. */
 const STATE_VERSION = 2;
 
@@ -97,15 +99,37 @@ export function createStore(stateDir) {
     // state. Bowing out is correct — the next Stop or SessionEnd picks this up.
     if (fd === null) return false;
 
+    // Keep the lock's mtime fresh while a slow upload is in flight. Without a
+    // heartbeat, a legitimate run with ten request timeouts looks stale after
+    // one minute and a second run can take the lock while the first still owns
+    // the spool.
+    fs.writeSync(fd, String(process.pid));
+    const heartbeat = setInterval(() => {
+      try {
+        const now = new Date();
+        fs.futimesSync(fd, now, now);
+      } catch {
+        /* the owner is already exiting or the fd was closed */
+      }
+    }, LOCK_HEARTBEAT_MS);
     try {
-      fs.writeSync(fd, String(process.pid));
-      fs.closeSync(fd);
       await fn();
     } finally {
+      clearInterval(heartbeat);
       try {
-        fs.unlinkSync(paths.lockFile);
+        fs.closeSync(fd);
       } catch {
-        /* already gone */
+        /* already closed */
+      }
+      // A stale takeover may have happened after this process stopped making
+      // progress. Only remove a lock whose owner marker is still ours; never
+      // unlink a newer run's lock in our finally block.
+      try {
+        if (fs.readFileSync(paths.lockFile, "utf8") === String(process.pid)) {
+          fs.unlinkSync(paths.lockFile);
+        }
+      } catch {
+        /* already gone or replaced */
       }
     }
     return true;
@@ -145,7 +169,7 @@ export function createStore(stateDir) {
     if (kept.length < events.length) {
       log(`spool overflow: dropped ${events.length - kept.length} oldest events`);
     }
-    fs.writeFileSync(paths.spoolFile, kept.map((e) => JSON.stringify(e)).join("\n") + "\n");
+    writeTextAtomic(paths.spoolFile, kept.map((e) => JSON.stringify(e)).join("\n") + "\n");
   }
 
   // -------------------------------------------------------------------------

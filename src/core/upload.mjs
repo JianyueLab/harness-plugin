@@ -103,6 +103,17 @@ export async function upload(ctx, events) {
       const bad = result.body.rejected ?? [];
       tally.rejected += bad.length;
       if (bad.length > 0) log(`portal rejected ${bad.length} event(s): ${JSON.stringify(bad.slice(0, 5))}`);
+      // The portal may reject events transiently when this batch introduces
+      // more than its model-creation allowance. Keep those exact events in
+      // the spool; report() has already recorded their keys in `seen`, but
+      // spool entries are retried independently on the next pass.
+      for (const item of bad) {
+        if (item?.reason !== "too_many_new_models") continue;
+        const index = item.index;
+        if (Number.isInteger(index) && index >= 0 && index < batch.length) {
+          failed.push(batch[index]);
+        }
+      }
     } else if (result.retry) {
       failed.push(...batch);
       log(`upload failed (will retry): ${result.status ?? "network"} ${result.message}`);

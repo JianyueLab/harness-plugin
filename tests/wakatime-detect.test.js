@@ -1,4 +1,4 @@
-import { afterAll, expect, test } from "bun:test";
+import { afterAll, expect, spyOn, test } from "bun:test";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -34,11 +34,58 @@ test("no .git falls back to the basename and reports no branch", () => {
   const plain = path.join(root, "plainthing");
   fs.mkdirSync(plain, { recursive: true });
 
-  const got = detectProject(plain, {}, 1_000, () => {
-    throw new Error("git must not be consulted when there is no .git");
+  // TMPDIR may itself be inside a Git checkout. Model a filesystem with no
+  // .git entries for this case only; real ancestor discovery is covered below.
+  const existsSync = fs.existsSync;
+  const exists = spyOn(fs, "existsSync").mockImplementation((file) =>
+    path.basename(file) === ".git" ? false : existsSync(file));
+  let gitCalls = 0;
+  try {
+    const got = detectProject(plain, {}, 1_000, () => {
+      gitCalls++;
+      throw new Error("git must not be consulted when there is no .git");
+    });
+    expect(got.project).toBe("plainthing");
+    expect(got.branch).toBeNull();
+    expect(gitCalls).toBe(0);
+  } finally {
+    exists.mockRestore();
+  }
+});
+
+test("a plain directory inside a repo inherits the ancestor project and branch", () => {
+  const repo = path.join(root, "ancestor-repo");
+  const plain = path.join(repo, "plainthing");
+  fs.mkdirSync(path.join(repo, ".git"), { recursive: true });
+  fs.mkdirSync(plain, { recursive: true });
+
+  let gitDir;
+  const got = detectProject(plain, {}, 1_000, (dir) => {
+    gitDir = dir;
+    return "ancestor-branch\n";
   });
-  expect(got.project).toBe("plainthing");
-  expect(got.branch).toBeNull();
+  expect(got.project).toBe("ancestor-repo");
+  expect(got.branch).toBe("ancestor-branch");
+  expect(gitDir).toBe(repo);
+});
+
+test.each(["directory", "file"])("the nearest nested repo wins with a .git %s", (kind) => {
+  const outer = path.join(root, `outer-${kind}`);
+  const inner = path.join(outer, "inner-repo");
+  const workspace = path.join(inner, "src", "deep");
+  fs.mkdirSync(path.join(outer, ".git"), { recursive: true });
+  fs.mkdirSync(workspace, { recursive: true });
+  if (kind === "directory") fs.mkdirSync(path.join(inner, ".git"));
+  else fs.writeFileSync(path.join(inner, ".git"), "gitdir: ../metadata\n");
+
+  let gitDir;
+  const got = detectProject(workspace, {}, 1_000, (dir) => {
+    gitDir = dir;
+    return "inner-branch\n";
+  });
+  expect(got.project).toBe("inner-repo");
+  expect(got.branch).toBe("inner-branch");
+  expect(gitDir).toBe(inner);
 });
 
 test("git failure is survivable", () => {

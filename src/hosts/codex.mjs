@@ -38,7 +38,7 @@ const fresh = () => ({ offset: 0, seen: 0, lastTotal: null, model: null, session
 export const host = {
   id: "codex",
   source: "codex",
-  client: "codex-usage-reporter/0.4.0",
+  client: "codex-usage-reporter/27.1.1",
   title: "jyl-usage — Codex CLI → llm-web usage reporter",
   unitLabel: "session",
   stateDir: path.join(CODEX_DIR, "jyl-usage"),

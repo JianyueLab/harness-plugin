@@ -62,7 +62,7 @@ export function timestampsFor(dbFile) {
 export const host = {
   id: "antigravity",
   source: "antigravity",
-  client: "antigravity-usage-reporter/27.1.0",
+  client: "antigravity-usage-reporter/27.1.1",
   title: "jyl-usage — Antigravity CLI → llm-web usage reporter",
   unitLabel: "conversation",
   stateDir: path.join(os.homedir(), ".gemini", "jyl-usage"),

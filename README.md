@@ -166,6 +166,22 @@ on this host (the reporter defaults to Claude Code):
 ./scripts/run --host antigravity --backfill [days]
 ```
 
+**Codex CLI** — `--host codex` reads Codex's rollout files under
+`~/.codex/sessions/` and keeps its state in `~/.codex/jyl-usage/`. Events go
+out as `source: "codex"`, which `llm-web` must accept before they are stored;
+until then they wait in the spool, as described for Antigravity below. This
+repo ships no Codex hook manifest, so run it by hand or from your own hook:
+
+```sh
+./scripts/run --host codex --status
+./scripts/run --host codex --flush
+./scripts/run --host codex --backfill [days]
+```
+
+Without `--host` the reporter uses Claude Code. An unknown host name is an
+error: the reporter prints `jyl-usage: unknown host "<name>". Known hosts:
+claude-code, antigravity, codex.` and exits 2 without reading anything.
+
 Two instruction files carry these same three verbs, and that split is
 deliberate, not duplication: `commands/jyl-usage.md` is Claude Code's slash
 command, `skills/jyl-usage/SKILL.md` is `agy`'s skill — each host reads its
@@ -322,8 +338,8 @@ route, same event shape, for both hosts — only `source` and `client` differ:
 
 ```jsonc
 {
-  "source": "claude-code",                        // or "antigravity"
-  "client": "claude-code-usage-reporter/27.1.0",    // or "antigravity-usage-reporter/27.1.0"
+  "source": "claude-code",                        // or "antigravity", "codex"
+  "client": "claude-code-usage-reporter/27.1.1",    // or "antigravity-usage-reporter/27.1.1", "codex-usage-reporter/27.1.1"
   "events": [
     {
       "requestId": "req_011Ce…",      // dedup key; falls back to messageId

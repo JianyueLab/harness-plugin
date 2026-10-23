@@ -35,14 +35,16 @@ import { report } from "./core/report.mjs";
 import { createStore } from "./core/store.mjs";
 import { host as claudeCode } from "./hosts/claude-code.mjs";
 import { host as antigravity } from "./hosts/antigravity.mjs";
+import { host as codex } from "./hosts/codex.mjs";
 
 /** Every host this reporter knows how to read. `--host` names one. */
-const HOSTS = { "claude-code": claudeCode, antigravity };
+const HOSTS = { "claude-code": claudeCode, antigravity, codex };
 
 /** Units touched within this many days are in scope for `--backfill`. */
 const DEFAULT_BACKFILL_DAYS = 30;
 
-const hostFor = (name) => HOSTS[name] ?? HOSTS["claude-code"];
+/** The host `--host` names, or `null` when no such host exists. */
+const hostFor = (name) => (Object.hasOwn(HOSTS, name) ? HOSTS[name] : null);
 
 // ---------------------------------------------------------------------------
 // Entry points
@@ -123,6 +125,15 @@ async function status(host, store, config) {
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   const host = hostFor(args.host);
+  if (!host) {
+    // Checked before any store or transcript is touched: a typo must not read
+    // and report another host's usage under the wrong name.
+    console.error(
+      `jyl-usage: unknown host "${args.host}". Known hosts: ${Object.keys(HOSTS).join(", ")}.`,
+    );
+    process.exitCode = 2;
+    return;
+  }
   const store = createStore(host.stateDir);
   const config = loadConfig({ files: configFiles(store.configFile) });
 

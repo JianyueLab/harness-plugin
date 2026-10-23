@@ -589,9 +589,12 @@ above. A trailing slash is trimmed.
 
 `[settings] hide_file_names = true` (or `"hideFileNames": true` in the JSON
 config) is honoured: file entities are replaced with an obfuscated
-placeholder that keeps only the extension (`agent.go` becomes `HIDDEN.go`; an
-extension-less file becomes `HIDDEN`), while the project name and branch are
-still reported. That trade-off is WakaTime's own, not one invented here.
+placeholder that keeps only the file's own extension (`agent.go` becomes
+`HIDDEN.go`; `a.test.ts` becomes `HIDDEN.ts`; `Makefile`, `.env` and
+`.gitignore` become `HIDDEN`). Directory names never contribute. The branch
+is not sent. The project name is still reported. This matches `wakatime-cli`,
+except that it sends `HIDDEN.env` for a dotfile. `hide_branch_names` and
+`hide_project_names` are not read.
 
 **No API key anywhere means this tool quietly does nothing.** Not a crash,
 not a log line on every single run — one line logged the first time, then

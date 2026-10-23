@@ -12,6 +12,7 @@
  * heartbeat also covers the run where the agent did nothing but `bash` —
  * work happened, and the time should not be zero because no file was named.
  */
+import path from "node:path";
 import { languageFor } from "./language.mjs";
 
 export const THROTTLE_MS = 120_000;
@@ -24,11 +25,13 @@ const WRITE_TOOLS = new Set(["edit_file", "write_file"]);
 /**
  * WakaTime's own convention for hidden names: keep the extension so language
  * stats survive, drop everything identifying.
+ *
+ * The extension comes from the basename only, so a dotted ancestor directory
+ * (`/x/.private/Makefile`) contributes nothing. A dotfile with no further
+ * extension (`.env`, `.gitignore`) has no extension: its whole name is the
+ * identifying part. wakatime-cli emits `HIDDEN.env` there; this does not.
  */
-const obfuscate = (p) => {
-  const dot = p.lastIndexOf(".");
-  return dot > 0 ? `HIDDEN${p.slice(dot)}` : "HIDDEN";
-};
+const obfuscate = (p) => `HIDDEN${path.extname(p)}`;
 
 export function heartbeatsFrom(payload, { project, branch, hideFileNames } = {}) {
   const beats = [];
@@ -49,7 +52,9 @@ export function heartbeatsFrom(payload, { project, branch, hideFileNames } = {})
       is_write: WRITE_TOOLS.has(call.name),
     };
     if (project) beat.project = project;
-    if (branch) beat.branch = branch;
+    // wakatime-cli drops the branch when hide_file_names applies and no
+    // hide_branch_names is configured; this tool reads no hide_branch_names.
+    if (branch && !hideFileNames) beat.branch = branch;
     const lang = languageFor(call.path);
     if (lang) beat.language = lang;
     beats.push(beat);

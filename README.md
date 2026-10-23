@@ -272,7 +272,13 @@ work.
 
 **Duplicates are impossible, by design at both ends.** Claude Code writes one
 transcript entry per content block, so a single API request that produced text
-*and* a tool call appears twice with the same `requestId` and the same `usage`.
+*and* a tool call appears twice with the same `requestId`. A line written before
+the response finished carries the output tokens counted so far, so the lines of
+one request are merged into one event holding the largest count of each kind.
+A request is reported once it is settled: a line of it has a `stop_reason`, the
+next request has started, or the transcript has not been written for 30
+minutes. Until then the cursor stays at its first line and the next run reads
+it again whole.
 Resuming a session goes further and copies its whole history into a new
 transcript file. The plugin filters both against one global dedup window — per
 transcript would not have recognised the fork — and the portal deduplicates on

@@ -323,7 +323,7 @@ route, same event shape, for both hosts — only `source` and `client` differ:
 ```jsonc
 {
   "source": "claude-code",                        // or "antigravity"
-  "client": "claude-code-usage-reporter/0.3.0",    // or "antigravity-usage-reporter/0.3.0"
+  "client": "claude-code-usage-reporter/27.1.0",    // or "antigravity-usage-reporter/27.1.0"
   "events": [
     {
       "requestId": "req_011Ce…",      // dedup key; falls back to messageId

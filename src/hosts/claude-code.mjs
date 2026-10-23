@@ -246,7 +246,7 @@ function recentTranscripts(days) {
 export const host = {
   id: "claude-code",
   source: "claude-code",
-  client: "claude-code-usage-reporter/0.3.0",
+  client: "claude-code-usage-reporter/27.1.0",
   title: "jyl-usage — Claude Code → llm-web usage reporter",
   unitLabel: "transcript",
   stateDir: path.join(CLAUDE_DIR, "jyl-usage"),

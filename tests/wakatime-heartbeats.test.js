@@ -102,11 +102,37 @@ test("a run that touched no file still produces the run heartbeat", () => {
   expect(beats[0].type).toBe("app");
 });
 
-test("hide_file_names obfuscates the entity but keeps the project", () => {
+test("hide_file_names obfuscates the entity, keeps the project, and drops the branch", () => {
   const beats = heartbeatsFrom(payload, { ...opts, hideFileNames: true });
   const file = beats.find((b) => b.type === "file");
   expect(file.entity).not.toContain("agent.go");
   expect(file.project).toBe("harness");
+  // wakatime-cli clears the branch under hide_file_names unless
+  // hide_branch_names is set, and this tool reads no hide_branch_names.
+  expect("branch" in file).toBe(false);
+  expect(JSON.stringify(beats)).not.toContain('"main"');
+});
+
+test("hide_file_names takes the extension from the basename only", () => {
+  const cases = [
+    ["/x/.private/project/Makefile", "HIDDEN"],
+    ["/x/.private/project/src/file.ts", "HIDDEN.ts"],
+    ["/x/my.app/Dockerfile", "HIDDEN"],
+    ["/x/.env", "HIDDEN"],
+    ["/x/.gitignore", "HIDDEN"],
+    ["/x/.eslintrc.json", "HIDDEN.json"],
+    ["/x/src/file.ts", "HIDDEN.ts"],
+    ["/x/src/a.test.ts", "HIDDEN.ts"],
+  ];
+  const beats = heartbeatsFrom(
+    {
+      ...payload,
+      tools: cases.map(([p], i) => ({ name: "read_file", path: p, at: i, elapsed_ms: 1, is_error: false })),
+    },
+    { ...opts, hideFileNames: true },
+  );
+  const files = beats.filter((b) => b.type === "file");
+  expect(files.map((f) => f.entity)).toEqual(cases.map(([, want]) => want));
 });
 
 // Final review M-5: the obfuscated entity keeps the extension, and nothing

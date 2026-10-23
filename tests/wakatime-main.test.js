@@ -632,7 +632,7 @@ test("I-3: hide_file_names set in the config reaches the heartbeats that actuall
     stdinText: fixture,
     cfg: { apiKey: "k", apiUrl: "https://x/api/v1", hideFileNames: true, enabled: true },
     now: 1_000,
-    runGit: () => "",
+    runGit: () => "feat/secret-branch\n",
     send: async (_ctx, beats) => {
       sent.push(...beats);
       return { tally: { sent: beats.length, accepted: beats.length }, failed: [], authFailed: false };
@@ -647,10 +647,12 @@ test("I-3: hide_file_names set in the config reaches the heartbeats that actuall
     // would make both README and spec false.
     expect(f.entity).toBe("HIDDEN.go");
     expect(f.project).toBe("harness"); // the project is still reported
+    expect("branch" in f).toBe(false); // wakatime-cli drops it under hide_file_names
   }
   // Nothing that goes out carries a path from the payload, on any beat.
   expect(JSON.stringify(sent)).not.toContain("/abs/");
   expect(JSON.stringify(sent)).not.toContain("agent.go");
+  expect(JSON.stringify(sent)).not.toContain("secret-branch");
 });
 
 // I-4 (Important), second half: `state.wakatimeAuthFailures` is the number

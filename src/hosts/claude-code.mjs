@@ -91,6 +91,30 @@ function eventFromEntry(entry) {
   return total > 0 ? event : null;
 }
 
+/** The token counts a request's lines are merged over. */
+const TOKEN_FIELDS = [
+  "inputTokens",
+  "outputTokens",
+  "cacheWrite5mTokens",
+  "cacheWrite1hTokens",
+  "cacheReadTokens",
+];
+
+/**
+ * How long a transcript must go unwritten before a request in it with no stop
+ * reason is taken as final. The longest gap observed between two lines of one
+ * request is about seven minutes.
+ */
+export const QUIET_MS = 30 * 60_000;
+
+/** The request an assistant entry belongs to, whether or not it is reportable. */
+function requestKeyOf(entry) {
+  if (!entry || entry.type !== "assistant") return null;
+  if (typeof entry.requestId === "string" && entry.requestId) return entry.requestId;
+  const id = entry.message?.id;
+  return typeof id === "string" && id ? id : null;
+}
+
 /**
  * Read the bytes appended to a transcript since `offset`.
  *
@@ -98,6 +122,20 @@ function eventFromEntry(entry) {
  * past a partial line would drop the turn it belongs to. A file that shrank was
  * rotated or replaced, so the offset restarts rather than reading from the
  * middle of an unrelated line.
+ *
+ * Claude Code writes one line per content block, all under one request id, and
+ * a line written before the response finished carries the `output_tokens`
+ * counted so far. The lines of one request are merged into one event holding the
+ * largest count of each kind. A request is emitted only once it is settled:
+ *
+ *   * one of its lines has a `stop_reason` — that line carries the final usage;
+ *   * an assistant line of a different request follows it — requests do not
+ *     interleave, so the next request starting means this one ended; or
+ *   * the transcript has not been written for `QUIET_MS`.
+ *
+ * An unsettled request is held back: the cursor stops at its first line, so the
+ * next run reads it again whole. Emitting it early would put its key in the
+ * dedup window, and the complete line read later would be dropped as sent.
  */
 function readNewEvents(file, offset) {
   let stat;
@@ -110,22 +148,26 @@ function readNewEvents(file, offset) {
   if (from === stat.size) return { events: [], offset: from };
 
   const fd = fs.openSync(file, "r");
-  let text;
+  let buf;
   try {
     const length = stat.size - from;
-    const buf = Buffer.allocUnsafe(length);
-    const read = fs.readSync(fd, buf, 0, length, from);
-    text = buf.subarray(0, read).toString("utf8");
+    buf = Buffer.allocUnsafe(length);
+    buf = buf.subarray(0, fs.readSync(fd, buf, 0, length, from));
   } finally {
     fs.closeSync(fd);
   }
 
-  const lastNewline = text.lastIndexOf("\n");
-  if (lastNewline < 0) return { events: [], offset: from }; // nothing complete yet
-  const complete = text.slice(0, lastNewline + 1);
+  const end = buf.lastIndexOf(0x0a) + 1;
+  if (end === 0) return { events: [], offset: from }; // nothing complete yet
 
-  const events = [];
-  for (const line of complete.split("\n")) {
+  /** key → { start, event, settled }, in order of first appearance. */
+  const requests = new Map();
+  let previous = null;
+  for (let start = 0; start < end; ) {
+    const newline = buf.indexOf(0x0a, start);
+    const line = buf.toString("utf8", start, newline);
+    const lineStart = start;
+    start = newline + 1;
     if (!line.trim()) continue;
     let entry;
     try {
@@ -133,10 +175,40 @@ function readNewEvents(file, offset) {
     } catch {
       continue; // a truncated or corrupt line is skipped, not fatal
     }
+    const key = requestKeyOf(entry);
+    if (key === null) continue;
+
+    if (previous !== null && previous !== key) requests.get(previous).settled = true;
+    previous = key;
+
+    let request = requests.get(key);
+    if (!request) {
+      request = { start: lineStart, event: null, settled: false };
+      requests.set(key, request);
+    }
+    if (typeof entry.message?.stop_reason === "string") request.settled = true;
+
     const event = eventFromEntry(entry);
-    if (event) events.push(event);
+    if (!event) continue;
+    if (!request.event) {
+      request.event = event;
+      continue;
+    }
+    for (const field of TOKEN_FIELDS) {
+      request.event[field] = Math.max(request.event[field], event[field]);
+    }
+    request.event.requestId ??= event.requestId;
+    request.event.messageId ??= event.messageId;
   }
-  return { events, offset: from + Buffer.byteLength(complete, "utf8") };
+
+  const quiet = Date.now() - stat.mtimeMs >= QUIET_MS;
+  const events = [];
+  let held = end;
+  for (const request of requests.values()) {
+    if (!request.settled && !quiet) held = Math.min(held, request.start);
+    else if (request.event) events.push(request.event);
+  }
+  return { events, offset: from + held };
 }
 
 /** Every transcript touched in the last `days` days. */

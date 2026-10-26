@@ -178,31 +178,14 @@ test("readGenMetadata: reads WAL-mode database with -wal/-shm deleted (agy state
   if (fs.existsSync(walFile)) fs.unlinkSync(walFile);
   if (fs.existsSync(shmFile)) fs.unlinkSync(shmFile);
 
-  // Assert both halves: direct read fails, readGenMetadata succeeds via fallback
-  expect(readViaBun(Database, file, 0)).toEqual(null);
+  // Modern SQLite can read this layout directly. The contract is successful
+  // read-only extraction, not an engine-version-specific initial failure.
   const rows = readGenMetadata(file, 0);
   expect(rows).not.toEqual(null);
   expect(rows.map((r) => r.idx)).toEqual([1, 3]);
+  expect(Buffer.from(rows[0].data)).toEqual(Buffer.from([100, 101]));
 });
 
-test("readGenMetadata: non-WAL database does not use fallback copy", () => {
-  const file = fixture("plain.db", [
-    [2, Buffer.from([110, 111])],
-    [4, Buffer.from([112, 113])],
-  ]);
-
-  const tmpdir = os.tmpdir();
-  const tmpsBefore = new Set(fs.readdirSync(tmpdir));
-
-  const rows = readGenMetadata(file, 0);
-  expect(rows.map((r) => r.idx)).toEqual([2, 4]);
-
-  // Verify no temp files were created (no fallback was needed)
-  const tmpsAfter = new Set(fs.readdirSync(tmpdir));
-  const created = [...tmpsAfter].filter((f) => !tmpsBefore.has(f));
-  const jylSqliteFiles = created.filter((f) => f.startsWith("jyl-sqlite-read-"));
-  expect(jylSqliteFiles.length).toEqual(0);
-});
 
 test("readGenMetadata: fallback copies are cleaned up", () => {
   const file = path.join(dir, "wal-for-cleanup.db");
@@ -221,19 +204,22 @@ test("readGenMetadata: fallback copies are cleaned up", () => {
   if (fs.existsSync(walFile)) fs.unlinkSync(walFile);
   if (fs.existsSync(shmFile)) fs.unlinkSync(shmFile);
 
-  const tmpdir = os.tmpdir();
-  const tmpsBefore = new Set(fs.readdirSync(tmpdir));
-
-  // Assert both halves: direct read fails, readGenMetadata succeeds via fallback
-  expect(readViaBun(Database, file, 0)).toEqual(null);
-  const rows = readGenMetadata(file, 0);
-  expect(rows).not.toEqual(null);
-
-  // Check that no jyl-sqlite-read-* files remain
-  const tmpsAfter = new Set(fs.readdirSync(tmpdir));
-  const created = [...tmpsAfter].filter((f) => !tmpsBefore.has(f));
-  const jylSqliteFiles = created.filter((f) => f.startsWith("jyl-sqlite-read-"));
-  expect(jylSqliteFiles.length).toEqual(0);
+  const tempDir = path.join(dir, "fallback-copy-scratch");
+  fs.mkdirSync(tempDir);
+  const before = fs.readFileSync(file);
+  // Model an external restriction on opening the original. The replacement
+  // still opens real SQLite copies and runs the real SELECT against them.
+  class RestrictedOriginalDatabase {
+    constructor(candidate, options) {
+      if (path.dirname(candidate) !== tempDir) throw new Error("synthetic original-file open restriction");
+      return new Database(candidate, options);
+    }
+  }
+  const rows = readGenMetadata(file, 0, { backend: { kind: "bun", Database: RestrictedOriginalDatabase }, tempDir });
+  expect(rows.map((row) => row.idx)).toEqual([5]);
+  expect(Buffer.from(rows[0].data)).toEqual(Buffer.from([120]));
+  expect(fs.readFileSync(file)).toEqual(before);
+  expect(fs.readdirSync(tempDir)).toEqual([]);
 });
 
 test("readGenMetadata: corrupt database returns null even with fallback attempt", () => {

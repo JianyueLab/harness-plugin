@@ -48,17 +48,24 @@ export function parseWakaCfg(text) {
   const KNOWN = new Set(["api_key", "api_key_vault_cmd", "api_url", "hide_file_names"]);
   const out = {};
   let inSettings = false;
+  let continuation = null;
   for (const raw of String(text ?? "").split("\n")) {
     const line = raw.trim();
     if (!line || line.startsWith("#") || line.startsWith(";")) continue;
+    if (inSettings && continuation === "hide_file_names" && /^[ \t]/.test(raw)) {
+      out.hide_file_names += `\n${line}`;
+      continue;
+    }
     if (line.startsWith("[")) {
       inSettings = line.toLowerCase() === "[settings]";
+      continuation = null;
       continue;
     }
     if (!inSettings) continue;
     const eq = line.indexOf("=");
-    if (eq < 0) continue; // continuation line of a multi-line value: not ours
+    if (eq < 0) { continuation = null; continue; }
     const key = line.slice(0, eq).trim();
+    continuation = KNOWN.has(key) ? key : null;
     if (!KNOWN.has(key)) continue;
     out[key] = line.slice(eq + 1).trim();
   }
@@ -341,6 +348,26 @@ export function loadWakaConfig({
 
   const apiUrl =
     trimUrl(env.WAKATIME_API_URL) || trimUrl(cfg.api_url) || trimUrl(json.apiUrl) || DEFAULT_API_URL;
+  const rawPrivacy = cfg.hide_file_names ?? json.hideFileNames ?? false;
+  let hideFileNames = false;
+  let privacyProblem = null;
+  if (typeof rawPrivacy === "boolean") hideFileNames = rawPrivacy;
+  else if (typeof rawPrivacy === "string" && /^(true|false)$/i.test(rawPrivacy.trim())) {
+    hideFileNames = rawPrivacy.trim().toLowerCase() === "true";
+  } else {
+    const patterns = Array.isArray(rawPrivacy) ? rawPrivacy :
+      typeof rawPrivacy === "string" && rawPrivacy.includes("\n") ? rawPrivacy.split("\n").map((line) => line.trim()).filter(Boolean) : null;
+    try {
+      if (!patterns || patterns.length === 0 || patterns.some((pattern) => typeof pattern !== "string" || /\[\[:/.test(pattern))) {
+        throw new Error("unsupported privacy value");
+      }
+      hideFileNames = patterns.map((pattern) => new RegExp(pattern, "u"));
+    } catch {
+      // An unsupported POSIX class or malformed regex must never expose paths.
+      hideFileNames = true;
+      privacyProblem = "hide_file_names must be true, false, or a supported multiline regex list";
+    }
+  }
 
   return {
     apiKey,
@@ -355,13 +382,15 @@ export function loadWakaConfig({
     // same generic string -- indistinguishable in *outcome* (both mean no
     // key), but not in what a user should go check.
     vaultCmdProblem: apiKey ? null : vaultCmdProblem,
-    hideFileNames: String(cfg.hide_file_names ?? json.hideFileNames ?? "").toLowerCase() === "true",
+    hideFileNames,
+    privacyProblem,
     enabled: env.JYL_WAKATIME_DISABLED === "1" ? false : json.enabled !== false,
   };
 }
 
 export function configProblem(cfg) {
   if (!cfg.enabled) return "disabled";
+  if (cfg.privacyProblem) return cfg.privacyProblem;
   if (!cfg.apiKey) return cfg.vaultCmdProblem ?? "no API key configured";
   try {
     new URL(cfg.apiUrl);

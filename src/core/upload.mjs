@@ -75,7 +75,17 @@ async function postBatch({ config, source, client }, events) {
       res.status === 429 ||
       res.status >= 500 ||
       (res.status === 400 && isUnknownSourceError(text));
-    return { ok: false, retry, status: res.status, message: text.slice(0, 300) };
+    let retryAt = null;
+    if (res.status === 429) {
+      const now = Date.now();
+      const raw = res.headers.get("retry-after");
+      const seconds = Number(raw || NaN);
+      const delay = Number.isFinite(seconds) ? seconds * 1000 : Date.parse(raw ?? "") - now;
+      // Only 429 defers later passes. Keep malformed/past/extreme headers from
+      // causing a tight retry loop or indefinitely pausing this local reporter.
+      retryAt = now + (Number.isFinite(delay) ? Math.min(3_600_000, Math.max(1000, delay)) : 60_000);
+    }
+    return { ok: false, retry, status: res.status, message: text.slice(0, 300), retryAt };
   } catch (err) {
     return { ok: false, retry: true, message: String(err?.message ?? err) };
   } finally {
@@ -92,6 +102,7 @@ export async function upload(ctx, events) {
   const { log } = ctx;
   const tally = { sent: 0, accepted: 0, duplicates: 0, rejected: 0, spooled: 0 };
   const failed = [];
+  let retryAt = null;
 
   for (let i = 0; i < events.length; i += BATCH_SIZE) {
     const batch = events.slice(i, i + BATCH_SIZE);
@@ -117,11 +128,16 @@ export async function upload(ctx, events) {
     } else if (result.retry) {
       failed.push(...batch);
       log(`upload failed (will retry): ${result.status ?? "network"} ${result.message}`);
+      if (result.status === 429) {
+        retryAt = result.retryAt;
+        failed.push(...events.slice(i + batch.length));
+        break;
+      }
     } else {
       log(`upload rejected, dropping ${batch.length} event(s): ${result.status} ${result.message}`);
     }
   }
 
   tally.spooled = failed.length;
-  return { tally, failed };
+  return { tally, failed, retryAt };
 }

@@ -137,7 +137,7 @@ function requestKeyOf(entry) {
  * next run reads it again whole. Emitting it early would put its key in the
  * dedup window, and the complete line read later would be dropped as sent.
  */
-function readNewEvents(file, offset) {
+function readNewEvents(file, offset, maxEvents = Infinity) {
   let stat;
   try {
     stat = fs.statSync(file);
@@ -205,8 +205,11 @@ function readNewEvents(file, offset) {
   const events = [];
   let held = end;
   for (const request of requests.values()) {
-    if (!request.settled && !quiet) held = Math.min(held, request.start);
-    else if (request.event) events.push(request.event);
+    if ((!request.settled && !quiet) || (request.event && events.length >= maxEvents)) {
+      held = request.start;
+      break;
+    }
+    if (request.event) events.push(request.event);
   }
   return { events, offset: from + held };
 }
@@ -250,7 +253,8 @@ export const host = {
   title: "jyl-usage — Claude Code → llm-web usage reporter",
   unitLabel: "transcript",
   stateDir: path.join(CLAUDE_DIR, "jyl-usage"),
-  unitsFromHook: (hook) => (typeof hook.transcript_path === "string" ? [hook.transcript_path] : []),
+  unitsFromHook: (hook) => [...new Set([hook.transcript_path, hook.agent_transcript_path]
+    .filter((unit) => typeof unit === "string" && unit.trim().length > 0))],
   recentUnits: (days) => recentTranscripts(days),
   probe(unit, entry) {
     let stat;
@@ -266,8 +270,8 @@ export const host = {
   // four-hundred-kilobyte one is exactly what tells someone whether the plugin
   // is quietly stuck.
   describePending: (count, totalPending) => `${count} transcript(s), ${totalPending} byte(s)`,
-  read(unit, entry) {
-    const { events, offset, gone } = readNewEvents(unit, entry.offset ?? 0);
+  read(unit, entry, _log, maxEvents = Infinity) {
+    const { events, offset, gone } = readNewEvents(unit, entry.offset ?? 0, maxEvents);
     return gone ? { events: [], entry: null } : { events, entry: { offset } };
   },
   skipReason(config) {

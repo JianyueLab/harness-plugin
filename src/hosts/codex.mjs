@@ -75,7 +75,7 @@ export const host = {
     return { mtimeMs: stat.mtimeMs, pending };
   },
 
-  read(unit, entry) {
+  read(unit, entry, _log, maxEvents = Infinity) {
     let stat;
     try {
       stat = fs.statSync(unit);
@@ -103,22 +103,27 @@ export const host = {
     const lastNewline = text.lastIndexOf("\n");
     if (lastNewline < 0) return { events: [], entry: { ...cur, mtimeMs: stat.mtimeMs } };
     const complete = text.slice(0, lastNewline + 1);
+    const completeBytes = Buffer.byteLength(complete, "utf8");
 
-    const lines = [];
+    const events = [];
+    let consumed = 0;
     for (const line of complete.split("\n")) {
+      if (events.length >= maxEvents) break;
+      // The trailing split element has no newline of its own.
+      if (consumed >= completeBytes) break;
+      consumed += Buffer.byteLength(line, "utf8") + 1;
       if (!line.trim()) continue;
+      let parsed;
       try {
-        lines.push(JSON.parse(line));
+        parsed = JSON.parse(line);
       } catch {
-        /* 截断或损坏的一行跳过,不致命 */
+        continue; // A corrupt complete line does not hide later usage.
       }
+      const result = eventsFrom([parsed], cur);
+      events.push(...result.events);
+      cur = { ...cur, ...result.state };
     }
-
-    const { events, state } = eventsFrom(lines, cur);
-    return {
-      events,
-      entry: { ...state, offset: cur.offset + Buffer.byteLength(complete, "utf8"), mtimeMs: stat.mtimeMs },
-    };
+    return { events, entry: { ...cur, offset: cur.offset + consumed, mtimeMs: stat.mtimeMs } };
   },
 
   // 走没走 llm-web 网关是**每个会话**的属性(信号是 session_meta.model_provider),

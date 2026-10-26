@@ -146,15 +146,13 @@ async function main() {
     return;
   }
 
-  const skip = host.skipReason(config);
-  if (skip) {
-    if (args.command !== "--hook") {
-      console.error(
-        `jyl-usage: ${skip}. ` +
-          'Set "reportGatewayTraffic": true in the config to report anyway.',
-      );
-    }
-    return;
+  // Observe provenance and discovery before the lock; each hook has its own
+  // immutable inbox entry even when another run owns all mutable state.
+  const hook = args.command === "--hook" ? await readHookInput() : null;
+  if (hook) {
+    const units = host.unitsFromHook(hook);
+    const skip = host.skipReason(config);
+    store.queueUnits(units, { excluded: !!skip });
   }
 
   if (args.command === "--backfill") {
@@ -185,8 +183,7 @@ async function main() {
   // read them. The sweep is why this is the path that changed: a lost lock or a
   // session that never reached SessionEnd used to strand a turn for good, and
   // `--backfill` only helped the people who knew to run it.
-  const hook = await readHookInput();
-  await store.withLock(() => report(host, store, config, host.unitsFromHook(hook), { sweep: true }));
+  await store.withLock(() => report(host, store, config, host.unitsFromHook(hook ?? {}), { sweep: true }));
 }
 
 main().catch((err) => {

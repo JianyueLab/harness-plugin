@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { existsSync, mkdirSync, readFileSync, utimesSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { PENDING_FRESH_MS, distill, runHost, stateDir } from '../src/worker.mjs';
+import { PENDING_FRESH_MS, STDOUT_KEEP_BYTES, distill, main, runHost, stateDir } from '../src/worker.mjs';
 import { claudeSession, codexSession, ompSession } from './fixtures.js';
 import { cleanup, tempDir, writeJsonl } from './helpers.js';
 
@@ -11,6 +11,7 @@ describe('distill', () => {
   let home;
   let calls;
   let exitCode;
+  let stdout;
   const deps = () => ({
     env: {},
     home,
@@ -18,7 +19,7 @@ describe('distill', () => {
     promptText: 'Use {{MCP_SERVER}}.',
     runHost: async (cmd, args, input, options) => {
       calls.push({ cmd, args, input, options });
-      return exitCode;
+      return { code: exitCode, stdout };
     },
   });
   const statePath = () => join(stateDir({}, home), 'plugin-state.json');
@@ -32,6 +33,7 @@ describe('distill', () => {
     home = tempDir('worker');
     calls = [];
     exitCode = 0;
+    stdout = 'Recorded one memory.\n\ndone\n';
   });
   afterEach(() => cleanup(home));
 
@@ -58,13 +60,74 @@ describe('distill', () => {
     expect(calls).toHaveLength(1);
   });
 
-  test('a failed host run keeps progress unchanged and removes the pending file', async () => {
+  test('a failed host run keeps progress unchanged, logs the exit code and removes the pending file', async () => {
     exitCode = 1;
     const lines = [...codexSession('x-1'), { timestamp: '2026-10-27T03:00:09.000Z', type: 'response_item', payload: { type: 'message', role: 'user', id: 'msg_u2', content: [{ type: 'input_text', text: 'two' }] } }, { timestamp: '2026-10-27T03:00:10.000Z', type: 'response_item', payload: { type: 'message', role: 'user', id: 'msg_u3', content: [{ type: 'input_text', text: 'three' }] } }];
     const path = transcript('rollout-x-1.jsonl', lines);
     expect(await distill({ host: 'codex', transcript_path: path, session_id: 'x-1', cwd: null }, deps())).toBe('failed');
     expect(existsSync(statePath())).toBe(false);
     expect(existsSync(join(stateDir({}, home), 'pending', 'codex_x-1.txt'))).toBe(false);
+    expect(readFileSync(join(stateDir({}, home), 'plugin.log'), 'utf8')).toContain('codex:x-1 failed exit=1');
+  });
+
+  const fourMessageSession = (id) => [...claudeSession(id), { type: 'user', sessionId: id, cwd: '/w', uuid: 'u9', message: { role: 'user', content: 'more' } }, { type: 'user', sessionId: id, cwd: '/w', uuid: 'u10', message: { role: 'user', content: 'again' } }];
+
+  test('exit 0 with a last non-empty line of done, in any case and padding, records progress', async () => {
+    stdout = 'Added a memory.\n  DONE  \n\n';
+    const path = transcript('c-d.jsonl', fourMessageSession('c-d'));
+    expect(await distill({ host: 'claude-code', transcript_path: path, session_id: 'c-d', cwd: '/w' }, deps())).toBe('distilled');
+    expect(JSON.parse(readFileSync(statePath(), 'utf8')).sessions['claude-code:c-d'].decision).toBe('sent');
+  });
+
+  for (const text of ['', 'failed\n', 'done\nfailed\n', 'done.\n', 'I am done\n']) {
+    test(`exit 0 without a final done line (${JSON.stringify(text)}) fails and keeps progress`, async () => {
+      stdout = text;
+      const path = transcript('c-n.jsonl', fourMessageSession('c-n'));
+      expect(await distill({ host: 'claude-code', transcript_path: path, session_id: 'c-n', cwd: '/w' }, deps())).toBe('failed');
+      expect(existsSync(statePath())).toBe(false);
+      expect(existsSync(join(stateDir({}, home), 'pending', 'claude-code_c-n.txt'))).toBe(false);
+      expect(readFileSync(join(stateDir({}, home), 'plugin.log'), 'utf8')).toContain('claude-code:c-n failed no-done');
+    });
+  }
+
+  test('a nonzero exit fails even when the host printed done', async () => {
+    exitCode = 2;
+    const path = transcript('c-x.jsonl', fourMessageSession('c-x'));
+    expect(await distill({ host: 'claude-code', transcript_path: path, session_id: 'c-x', cwd: '/w' }, deps())).toBe('failed');
+    expect(existsSync(statePath())).toBe(false);
+  });
+
+  test('codex runs disable every other MCP server from CODEX_HOME/config.toml; other hosts do not read it', async () => {
+    const codexHome = join(home, 'codex-home');
+    mkdirSync(codexHome, { recursive: true });
+    writeFileSync(join(codexHome, 'config.toml'), '[mcp_servers.memory]\nurl = "x"\n[mcp_servers.github]\ncommand = "gh"\n');
+    const lines = [...codexSession('x-2'), { timestamp: '2026-10-27T03:00:09.000Z', type: 'response_item', payload: { type: 'message', role: 'user', id: 'msg_u2', content: [{ type: 'input_text', text: 'two' }] } }, { timestamp: '2026-10-27T03:00:10.000Z', type: 'response_item', payload: { type: 'message', role: 'user', id: 'msg_u3', content: [{ type: 'input_text', text: 'three' }] } }];
+    const path = transcript('rollout-x-2.jsonl', lines);
+    expect(await distill({ host: 'codex', transcript_path: path, session_id: 'x-2', cwd: null }, { ...deps(), env: { CODEX_HOME: codexHome } })).toBe('distilled');
+    const args = calls[0].args;
+    expect(args.filter((a, i) => args[i - 1] === '-c')).toEqual(['mcp_servers.github.enabled=false']);
+    const claudePath = transcript('c-o.jsonl', fourMessageSession('c-o'));
+    await distill({ host: 'claude-code', transcript_path: claudePath, session_id: 'c-o', cwd: '/w' }, { ...deps(), env: { CODEX_HOME: codexHome } });
+    expect(calls[1].args).not.toContain('-c');
+  });
+
+  test('main logs a worker error by name and message, without transcript content', async () => {
+    const path = transcript('c-e.jsonl', fourMessageSession('c-e'));
+    mkdirSync(stateDir({}, home), { recursive: true });
+    writeFileSync(statePath(), '{corrupt');
+    const { promptText, ...rest } = deps();
+    await main([JSON.stringify({ host: 'claude-code', transcript_path: path, session_id: 'c-e', cwd: '/w' })], { ...rest, loadPrompt: () => promptText });
+    const log = readFileSync(join(stateDir({}, home), 'plugin.log'), 'utf8');
+    expect(log).toContain(`worker error: Error: state file is not valid JSON: ${statePath()}`);
+    expect(log).not.toContain('again');
+    expect(log.trimEnd().split('\n').filter((line) => line.includes('worker error'))).toHaveLength(1);
+    expect(calls).toHaveLength(0);
+  });
+
+  test('main logs an unparsable payload', async () => {
+    const { promptText, ...rest } = deps();
+    await main(['not json'], { ...rest, loadPrompt: () => promptText });
+    expect(readFileSync(join(stateDir({}, home), 'plugin.log'), 'utf8')).toContain('worker error: SyntaxError: ');
   });
 
   test('a fresh pending file means another run is in progress', async () => {
@@ -98,15 +161,29 @@ describe('distill', () => {
 });
 
 describe('runHost', () => {
-  test('passes stdin through and returns the exit code; a missing binary is 127', async () => {
+  test('passes stdin through and returns the exit code and stdout; a missing binary is 127', async () => {
     const dir = tempDir('runhost');
     try {
       const out = join(dir, 'out.txt');
       const script = join(dir, 'fake.sh');
-      writeFileSync(script, `#!/bin/sh\ncat > "${out}"\nexit 3\n`, { mode: 0o755 });
-      expect(await runHost(script, [], 'hello', { env: process.env, cwd: dir })).toBe(3);
+      writeFileSync(script, `#!/bin/sh\ncat > "${out}"\necho working\necho done\nexit 3\n`, { mode: 0o755 });
+      expect(await runHost(script, [], 'hello', { env: process.env, cwd: dir })).toEqual({ code: 3, stdout: 'working\ndone\n' });
       expect(readFileSync(out, 'utf8')).toBe('hello');
-      expect(await runHost(join(dir, 'missing'), [], '', { env: process.env, cwd: dir })).toBe(127);
+      expect(await runHost(join(dir, 'missing'), [], '', { env: process.env, cwd: dir })).toEqual({ code: 127, stdout: '' });
+    } finally {
+      cleanup(dir);
+    }
+  });
+
+  test('keeps only the last STDOUT_KEEP_BYTES of stdout', async () => {
+    const dir = tempDir('runhost');
+    try {
+      const script = join(dir, 'chatty.sh');
+      writeFileSync(script, `#!/bin/sh\nhead -c ${STDOUT_KEEP_BYTES * 3} /dev/zero | tr '\\0' 'x'\necho\necho done\n`, { mode: 0o755 });
+      const { code, stdout } = await runHost(script, [], '', { env: process.env, cwd: dir });
+      expect(code).toBe(0);
+      expect(Buffer.byteLength(stdout)).toBe(STDOUT_KEEP_BYTES);
+      expect(stdout.endsWith('x\ndone\n')).toBe(true);
     } finally {
       cleanup(dir);
     }
@@ -118,7 +195,7 @@ describe('runHost', () => {
       const script = join(dir, 'stubborn.sh');
       writeFileSync(script, "#!/bin/sh\ntrap '' TERM\nwhile true; do sleep 1; done\n", { mode: 0o755 });
       const started = Date.now();
-      const code = await runHost(script, [], '', { env: process.env, cwd: dir, timeoutMs: 200, killGraceMs: 200 });
+      const { code } = await runHost(script, [], '', { env: process.env, cwd: dir, timeoutMs: 200, killGraceMs: 200 });
       expect(code).not.toBe(0);
       expect(Date.now() - started).toBeLessThan(2000);
     } finally {

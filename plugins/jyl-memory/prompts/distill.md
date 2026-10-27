@@ -12,4 +12,4 @@ Use only the `{{MCP_SERVER}}` MCP tools: jyl_project_list, jyl_memory_search, jy
 3. At most 5 adds or updates. If nothing is worth keeping, write nothing.
 4. Never record secrets, tokens, passwords, keys, or personal data about other people.
 
-Reply with "done" when finished.
+Reply with `done` as your last line only if jyl_project_list succeeded and every add or update you intended succeeded, or nothing was worth keeping. Otherwise reply `failed`.

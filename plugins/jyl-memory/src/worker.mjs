@@ -2,9 +2,8 @@ import { spawn } from 'node:child_process';
 import { appendFileSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { ConfigError, loadConfig } from './config.mjs';
-import { buildPrompt, hostCommand } from './hosts.mjs';
+import { buildPrompt, codexMcpServers, hostCommand } from './hosts.mjs';
 import { planDistill } from './plan.mjs';
 import * as claudeCode from './sources/claude-code.mjs';
 import * as codex from './sources/codex.mjs';
@@ -15,6 +14,7 @@ export const PENDING_FRESH_MS = 15 * 60_000;
 export const HOST_TIMEOUT_MS = 10 * 60_000;
 export const LOG_MAX_BYTES = 256 * 1024;
 export const KILL_GRACE_MS = 10_000;
+export const STDOUT_KEEP_BYTES = 64 * 1024;
 
 const READERS = { 'claude-code': claudeCode, codex, omp };
 
@@ -85,11 +85,16 @@ export async function distill(payload, { env, home, now, runHost: run, promptTex
   }
 
   try {
-    const { cmd, args } = hostCommand(payload.host, { model: config.models[payload.host], mcpServer: config.mcp_server });
+    const otherMcpServers = payload.host === 'codex' ? codexMcpServers(env, home) : [];
+    const { cmd, args } = hostCommand(payload.host, { model: config.models[payload.host], mcpServer: config.mcp_server, otherMcpServers });
     const input = buildPrompt(promptText, { mcpServer: config.mcp_server, sessionText: plan.text, cwd: session.cwd });
-    const code = await run(cmd, args, input, { env: { ...env, JYL_MEMORY_DISTILL: '1' }, cwd: dir });
+    const { code, stdout } = await run(cmd, args, input, { env: { ...env, JYL_MEMORY_DISTILL: '1' }, cwd: dir });
     if (code !== 0) {
       log(dir, now, `${key} failed exit=${code}`);
+      return 'failed';
+    }
+    if (!reportedDone(stdout)) {
+      log(dir, now, `${key} failed no-done`);
       return 'failed';
     }
     await withLock(dir, async () => {
@@ -109,15 +114,26 @@ export async function distill(payload, { env, home, now, runHost: run, promptTex
   }
 }
 
+function reportedDone(stdout) {
+  const lines = stdout.split('\n').map((line) => line.trim()).filter(Boolean);
+  return lines.at(-1)?.toLowerCase() === 'done';
+}
+
+/** Runs the host CLI; resolves { code, stdout } with the last STDOUT_KEEP_BYTES of stdout. */
 export function runHost(cmd, args, input, { env, cwd, timeoutMs = HOST_TIMEOUT_MS, killGraceMs = KILL_GRACE_MS }) {
   return new Promise((resolve) => {
     let child;
     try {
-      child = spawn(cmd, args, { env, cwd, stdio: ['pipe', 'ignore', 'ignore'] });
+      child = spawn(cmd, args, { env, cwd, stdio: ['pipe', 'pipe', 'ignore'] });
     } catch {
-      resolve(127);
+      resolve({ code: 127, stdout: '' });
       return;
     }
+    let kept = Buffer.alloc(0);
+    child.stdout.on('data', (chunk) => {
+      kept = Buffer.concat([kept, chunk]);
+      if (kept.length > STDOUT_KEEP_BYTES) kept = kept.subarray(kept.length - STDOUT_KEEP_BYTES);
+    });
     let timedOut = false;
     let grace;
     const timer = setTimeout(() => {
@@ -131,24 +147,34 @@ export function runHost(cmd, args, input, { env, cwd, timeoutMs = HOST_TIMEOUT_M
     };
     child.on('error', () => {
       clear();
-      resolve(127);
+      resolve({ code: 127, stdout: '' });
     });
     child.on('close', (code) => {
       clear();
-      resolve(timedOut ? 124 : (code ?? 1));
+      resolve({ code: timedOut ? 124 : (code ?? 1), stdout: kept.toString('utf8') });
     });
     child.stdin.on('error', () => {});
     child.stdin.end(input);
   });
 }
 
-if (process.argv[1] === fileURLToPath(import.meta.url)) {
+/** Worker entry: distills the payload in argv[0]; logs any error to plugin.log. */
+export async function main(argv, { env, home, now, runHost: run, loadPrompt }) {
   try {
-    const payload = JSON.parse(process.argv[2] ?? '');
-    const promptText = readFileSync(new URL('../prompts/distill.md', import.meta.url), 'utf8');
-    await distill(payload, { env: process.env, home: homedir(), now: Date.now, runHost, promptText });
-  } catch {
-    // A background worker has nowhere to report; plugin.log carries known outcomes.
+    const payload = JSON.parse(argv[0] ?? '');
+    await distill(payload, { env, home, now, runHost: run, promptText: loadPrompt() });
+  } catch (error) {
+    try {
+      const text = `${error?.name ?? 'Error'}: ${error?.message ?? String(error)}`.replace(/\s+/g, ' ');
+      log(stateDir(env, home), now, `worker error: ${text}`);
+    } catch {
+      // Logging never fails the worker.
+    }
   }
+}
+
+if (import.meta.main ?? process.argv[1]?.endsWith('/src/worker.mjs')) {
+  const loadPrompt = () => readFileSync(new URL('../prompts/distill.md', import.meta.url), 'utf8');
+  await main(process.argv.slice(2), { env: process.env, home: homedir(), now: Date.now, runHost, loadPrompt });
   process.exitCode = 0;
 }

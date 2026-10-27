@@ -377,6 +377,51 @@ otherwise deliberately ungated: it spends nothing, so refusing a report
 because the reporter is over its allowance would only throw away the evidence
 that they are.
 
+## jyl-memory
+
+Recalls JianyueLab memory at session start and distils each session into it when the session ends. Separate from `jyl-usage`: this plugin sends memory content, not counts.
+
+**What leaves the machine:** distilled memories only, written through the `memory` MCP server into your personal project. Session text goes only to the model of the host you are already using (`claude -p`, `codex exec`, `omp -p`), with tool output dropped and known secret shapes redacted.
+
+### Install
+
+Prerequisite: the `memory` MCP server is configured and logged in for each host (`/mcp` in Claude Code, `codex mcp login memory`).
+
+- Claude Code: `/plugin marketplace add JianyueLab/harness-plugin`, then `/plugin install jyl-memory@jianyuelab-claude`.
+- Codex: `codex plugin marketplace add JianyueLab/harness-plugin`, `codex plugin add jyl-memory@jianyuelab-claude`, then trust both hooks in `/hooks`.
+- omp: link `plugins/jyl-memory/hooks/post/jyl-memory.ts` into `~/.omp/agent/hooks/post/` (omp loads `hooks/post/*.ts`; it ignores `hooks/hooks.json`), or run omp with `--plugin-dir plugins/jyl-memory`.
+
+This repo's `.agents/plugins/marketplace.json` takes precedence over `.claude-plugin/marketplace.json` for Codex, so Codex lists only `jyl-memory` from this repo.
+
+`JYL_MEMORY_RUNTIME` may name an absolute `node` or `bun` binary; otherwise the launcher uses `bun`, then `node`, from `PATH`.
+
+### How it works
+
+- Session start: a short prompt tells the agent to search memory before working. In omp, it is appended to the system prompt.
+- Session end: the hook hands the transcript to a background worker and returns. The worker takes messages not distilled yet, skips sessions with fewer than 3 new user messages or under an excluded directory, and runs the host CLI with only the memory MCP tools:
+  - Claude Code: built-in tools off.
+  - Codex: shell, plugins, apps, hooks and every other configured MCP server off.
+  - omp: always-ask approval, with only the five memory tools allowed.
+- In omp, `/new`, fork, resume and branch switches also distil the session left behind.
+- The host writes only to your personal project. It searches existing memories first and updates them instead of adding duplicates; at most 5 writes per session.
+- Progress is recorded only when the host exits 0 and its last line is `done`.
+- Each distillation costs one host model run.
+
+### Config
+
+`~/.config/jyl-memory/plugin.json`, optional:
+
+| Key | Default | |
+|---|---|---|
+| `enabled` | `true` | `false` turns the plugin off |
+| `exclude_paths` | `[]` | sessions under these directories are not distilled |
+| `min_user_messages` | `3` | fewer new user messages: skip |
+| `max_chars` | `200000` | text cap per run (newest messages kept) |
+| `mcp_server` | `memory` | name of the memory MCP server in each host |
+| `models` | `{"claude-code":"haiku","codex":null,"omp":"@smol"}` | model per host; `null` uses the host default |
+
+State and log: `~/.local/state/jyl-memory/` (`plugin-state.json`, `plugin.log`).
+
 ## jyl-wakatime
 
 jyl-wakatime turns harness's `RunEnd` hook payload — one line of JSON, fired

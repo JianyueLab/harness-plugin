@@ -1,0 +1,21 @@
+#!/usr/bin/env sh
+# Launcher for jyl-memory hooks: find a runtime, run src/hook.mjs, never fail the host.
+set -eu
+
+ROOT="${CLAUDE_PLUGIN_ROOT:-$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)}"
+ENTRY="$ROOT/src/hook.mjs"
+
+if [ -n "${NODE_OPTIONS:-}" ]; then
+  unset NODE_OPTIONS
+fi
+
+if [ -n "${JYL_MEMORY_RUNTIME:-}" ] && [ -x "${JYL_MEMORY_RUNTIME}" ]; then
+  exec "${JYL_MEMORY_RUNTIME}" "$ENTRY" "$@"
+fi
+if command -v bun >/dev/null 2>&1; then
+  exec bun "$ENTRY" "$@"
+fi
+if command -v node >/dev/null 2>&1; then
+  exec node "$ENTRY" "$@"
+fi
+exit 0

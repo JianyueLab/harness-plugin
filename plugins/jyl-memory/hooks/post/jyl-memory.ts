@@ -5,24 +5,38 @@ import { fileURLToPath } from "node:url";
 const RUN = fileURLToPath(new URL("../../scripts/run", import.meta.url));
 const RECALL = readFileSync(new URL("../../prompts/recall.md", import.meta.url), "utf8");
 
+function distill(file: string, sessionId: string | null): void {
+  const payload = JSON.stringify({ transcript_path: file, session_id: sessionId, cwd: process.cwd() });
+  const child = spawn(RUN, ["end", "--host", "omp"], { detached: true, stdio: ["pipe", "ignore", "ignore"] });
+  child.on("error", () => {});
+  child.stdin.end(payload);
+  child.unref();
+}
+
 export default function jylMemory(pi: any): void {
   if (process.env.JYL_MEMORY_DISTILL) return;
-  let recalled = false;
 
-  pi.on("before_agent_start", async (_event: unknown, ctx: any) => {
-    if (recalled || ctx?.agent?.kind === "sub") return;
-    recalled = true;
-    return { message: { customType: "jyl-memory.recall", content: RECALL, display: false } };
+  pi.on("before_agent_start", async (event: any, ctx: any) => {
+    if (ctx?.agent?.kind === "sub") return;
+    const base = event?.systemPrompt;
+    if (Array.isArray(base)) {
+      if (base.some((b: unknown) => typeof b === "string" && b.includes(RECALL))) return;
+      return { systemPrompt: [...base, RECALL] };
+    }
+    if (typeof base === "string") {
+      if (base.includes(RECALL)) return;
+      return { systemPrompt: `${base}\n\n${RECALL}` };
+    }
+  });
+
+  pi.on("session_switch", async (event: any, ctx: any) => {
+    if (ctx?.agent?.kind !== "sub" && event?.previousSessionFile) distill(event.previousSessionFile, null);
   });
 
   pi.on("session_shutdown", async (_event: unknown, ctx: any) => {
     if (ctx?.agent?.kind === "sub") return;
     const file = ctx?.sessionManager?.getSessionFile?.();
     if (!file) return;
-    const payload = JSON.stringify({ transcript_path: file, session_id: ctx.sessionManager.getSessionId?.() ?? null, cwd: process.cwd() });
-    const child = spawn(RUN, ["end", "--host", "omp"], { detached: true, stdio: ["pipe", "ignore", "ignore"] });
-    child.on("error", () => {});
-    child.stdin.end(payload);
-    child.unref();
+    distill(file, ctx.sessionManager.getSessionId?.() ?? null);
   });
 }

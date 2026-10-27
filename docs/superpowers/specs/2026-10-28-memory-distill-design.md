@@ -30,7 +30,7 @@ plugins/jyl-memory/
   .claude-plugin/plugin.json     Claude Code 清单
   .codex-plugin/plugin.json      Codex 清单（hooks 指向 ./hooks/hooks.json）
   hooks/hooks.json               SessionStart、SessionEnd（Claude Code 与 Codex 同格式，omp 忽略）
-  hooks/post/jyl-memory.ts       omp 钩子（before_agent_start、session_shutdown；Claude Code 与 Codex 忽略）
+  hooks/post/jyl-memory.ts       omp 钩子（before_agent_start、session_switch、session_branch、session_shutdown；Claude Code 与 Codex 忽略）
   prompts/distill.md             提炼提示词
   prompts/recall.md              开工时注入的提示
   scripts/run                    启动器：选 bun 或 node，总以 0 退出
@@ -63,7 +63,7 @@ plugins/jyl-memory/
 
 ## 5. 会话结束：提炼
 
-1. 钩子收到会话 ID 与记录文件路径（Claude Code、Codex 从 stdin JSON 的 `session_id`、`transcript_path`、`cwd`；omp 由 `ctx.sessionManager.getSessionFile()`）。环境变量 `JYL_MEMORY_DISTILL=1` 存在时立即退出，避免后台提炼会话再次触发自己。钩子把数据交给后台 worker 后立即返回，不读会话文件。
+1. 钩子收到会话 ID 与记录文件路径（Claude Code、Codex 从 stdin JSON 的 `session_id`、`transcript_path`、`cwd`；omp 在 `session_shutdown` 由 `ctx.sessionManager.getSessionFile()`，在 `session_switch` 与 `session_branch` 由事件的 `previousSessionFile`，只处理主 agent）。环境变量 `JYL_MEMORY_DISTILL=1` 存在时立即退出，避免后台提炼会话再次触发自己。钩子把数据交给后台 worker 后立即返回，不读会话文件。
 2. 用对应读取器读出正文（只含用户与助手文本，规则同 `memory-capture` 设计第 6、7 节）。
 3. 跳过条件：
    - 会话目录在 `exclude_paths` 之内；
@@ -76,14 +76,16 @@ plugins/jyl-memory/
    - 已有记忆过时则 `jyl_memory_update`，没有则 `jyl_memory_add`；
    - 每次会话最多写 5 条；没有值得长期记住的内容就不写；
    - 不写密钥、token、密码、个人隐私数据。
-7. 宿主 CLI 以 0 退出后，状态记下本次已提炼到的最后一条消息 ID，并删除正文文件。失败时保留进度不变，下次结束时连同新消息一起重试。
+   - 最后一行回复 `done`：`jyl_project_list` 成功，且每个打算的新增或更新都成功，或没有值得记的内容；否则回复 `failed`。
+7. 成功的条件：宿主 CLI 以 0 退出，且 stdout 最后一个非空行去掉首尾空白、转小写后恰为 `done`（worker 保留 stdout 最后 64 KB）。成功后状态记下本次已提炼到的最后一条消息 ID。其他情况为失败：日志记 `failed exit=<code>` 或 `failed no-done`，进度不变，下次结束时连同新消息一起重试。无论成败都删除正文文件。
+8. worker 的未预期错误在 `plugin.log` 记一行 `worker error: <name>: <message>`，不含会话正文。
 
 宿主 CLI 的调用：
 
 | 宿主 | 命令 | 工具限制 |
 |---|---|---|
 | Claude Code | `claude -p --no-session-persistence --model <model>` | `--allowedTools` 只含四个 memory 工具 |
-| Codex | `codex exec --skip-git-repo-check --ephemeral -s read-only [-m <model>] -` | memory MCP 工具免确认（参数在实施时实测） |
+| Codex | `codex exec --skip-git-repo-check --ephemeral -s read-only [-m <model>] -` | `--disable` 关闭 `shell_tool`、`unified_exec`、`view_image`、`multi_agent`、`image_generation`、`apps`、`plugins`、`hooks`；`$CODEX_HOME/config.toml`（默认 `~/.codex/config.toml`）中 `[mcp_servers.<name>]` 声明的其他 MCP 服务器各加 `-c mcp_servers.<name>.enabled=false`，只留 memory MCP |
 | omp | `omp -p --no-session --no-title --max-time 10m [--model <model>]` | 不开内置工具，只用 memory MCP（实施时实测 `--no-tools` 下 MCP 是否可用） |
 
 `<model>` 默认：Claude Code 为 `haiku`，omp 为 `@smol`，Codex 用其默认模型。可在配置中改。

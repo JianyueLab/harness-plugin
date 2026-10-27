@@ -28,40 +28,49 @@
 ```text
 plugins/jyl-memory/
   .claude-plugin/plugin.json     Claude Code 清单
-  .codex-plugin/plugin.json      Codex 清单
-  hooks/hooks.json               SessionStart、SessionEnd（Claude Code 与 Codex 同格式）
-  omp/jyl-memory.ts              omp 钩子（session_start、session_shutdown）
+  .codex-plugin/plugin.json      Codex 清单（hooks 指向 ./hooks/hooks.json）
+  hooks/hooks.json               SessionStart、SessionEnd（Claude Code 与 Codex 同格式，omp 忽略）
+  hooks/post/jyl-memory.ts       omp 钩子（before_agent_start、session_shutdown；Claude Code 与 Codex 忽略）
   prompts/distill.md             提炼提示词
   prompts/recall.md              开工时注入的提示
   scripts/run                    启动器：选 bun 或 node，总以 0 退出
-  src/hook.mjs                   入口：解析钩子数据，分派 start / end
-  src/sources/                   读取器（来自 memory-capture，Claude Code / Codex / omp）
+  src/hook.mjs                   钩子入口：start 输出提示；end 交给后台 worker 后立即返回
+  src/worker.mjs                 后台：读取、截取、运行宿主 CLI、更新状态
+  src/plan.mjs                   跳过条件与增量截取
+  src/hosts.mjs                  各宿主 CLI 的命令行
+  src/config.mjs                 插件配置
+  src/sources/                   读取器（来自 memory-capture）
   src/filter.mjs、src/scrub.mjs  正文过滤与脱敏（来自 memory-capture）
-  src/state.mjs                  每个会话的提炼进度与文件锁
-  src/distill.mjs                组装输入，后台启动宿主 CLI
+  src/state.mjs                  提炼进度与文件锁（来自 memory-capture，状态文件改名）
   test/
 ```
 
 `.claude-plugin/marketplace.json` 增加 `jyl-memory`，`source` 为 `./plugins/jyl-memory`。
-`.agents/plugins/marketplace.json` 增加同一插件，供 Codex 使用。
+`.agents/plugins/marketplace.json` 增加同一插件，供 Codex 使用；marketplace 名同为 `jianyuelab-claude`。
+
+实测（2026-10-28）：
+- omp 从插件目录加载 `hooks/post/*.ts`，`session_start` 与 `session_shutdown` 都触发；omp 不执行 `hooks/hooks.json`。
+- Codex 执行插件 `hooks/hooks.json` 中的 `SessionStart` 与 `SessionEnd`；首次需在 `/hooks` 信任；`codex exec` 也触发这些钩子。Codex 为插件钩子同时设置 `PLUGIN_ROOT` 与 `CLAUDE_PLUGIN_ROOT`。`SessionEnd` 超时默认 1 秒、最多 3 秒。
+- `omp -p --no-session --tools read` 能调用 memory MCP。
+- Codex 与 Claude Code 的 memory MCP 需先登录，登录前后台调用失败。
 
 ## 4. 会话开始：读取
 
-- Claude Code、Codex：`SessionStart` 钩子输出 `prompts/recall.md` 的内容，作为上下文注入。
-- omp：`session_start` 钩子注入同一段内容。
+- Claude Code、Codex：`SessionStart` 钩子把 `prompts/recall.md` 的内容输出到 stdout，两者都把它作为上下文注入。
+- omp：`before_agent_start` 在会话第一次提问时注入同一段内容；子 agent 不注入。
 - 提示内容：记忆在 memory MCP；开始任务前，用任务关键词调用 `jyl_memory_search`，并调用 `jyl_project_get_context` 取个人项目的事实与决定；本插件会在会话结束时写入记忆，agent 不需要自己写。
 - 不访问网络，不需要 token。
 
 ## 5. 会话结束：提炼
 
-1. 钩子收到会话 ID 与记录文件路径。环境变量 `JYL_MEMORY_DISTILL=1` 存在时立即退出，避免后台提炼会话再次触发自己。
+1. 钩子收到会话 ID 与记录文件路径（Claude Code、Codex 从 stdin JSON 的 `session_id`、`transcript_path`、`cwd`；omp 由 `ctx.sessionManager.getSessionFile()`）。环境变量 `JYL_MEMORY_DISTILL=1` 存在时立即退出，避免后台提炼会话再次触发自己。钩子把数据交给后台 worker 后立即返回，不读会话文件。
 2. 用对应读取器读出正文（只含用户与助手文本，规则同 `memory-capture` 设计第 6、7 节）。
 3. 跳过条件：
    - 会话目录在 `exclude_paths` 之内；
    - 自上次提炼以来新增的用户消息少于 `min_user_messages`（默认 3）。
 4. 只取上次提炼之后新增的消息。正文总长超过 `max_chars`（默认 200000）时只保留最后 `max_chars` 个字符。
-5. 把正文写入 `$XDG_STATE_HOME/jyl-memory/pending/<会话键>.txt`（权限 0600），以脱离进程的方式启动宿主 CLI，然后立即返回。宿主 CLI 的环境带 `JYL_MEMORY_DISTILL=1`。
-6. 宿主 CLI 收到 `prompts/distill.md` 与正文文件路径，按提示词执行：
+5. worker 把正文写入 `$XDG_STATE_HOME/jyl-memory/pending/<会话键>.txt`（权限 0600）。同一会话已有不到 15 分钟的 pending 文件时跳过，视为上一次仍在运行。
+6. worker 启动宿主 CLI，提示词与正文经 stdin 传入，环境带 `JYL_MEMORY_DISTILL=1`，超时 10 分钟。宿主按提示词执行：
    - 读正文；
    - 对候选主题先调用 `jyl_memory_search` 查已有记忆；
    - 已有记忆过时则 `jyl_memory_update`，没有则 `jyl_memory_add`；
@@ -73,11 +82,11 @@ plugins/jyl-memory/
 
 | 宿主 | 命令 | 工具限制 |
 |---|---|---|
-| Claude Code | `claude -p --model <model>` | `--allowedTools` 只含 Read 与四个 memory 工具 |
-| Codex | `codex exec --model <model> -s read-only` | memory MCP 免确认；只读沙箱 |
-| omp | `omp -p --model <model>` | 只开 read 与 memory MCP |
+| Claude Code | `claude -p --no-session-persistence --model <model>` | `--allowedTools` 只含四个 memory 工具 |
+| Codex | `codex exec --skip-git-repo-check --ephemeral -s read-only [-m <model>] -` | memory MCP 工具免确认（参数在实施时实测） |
+| omp | `omp -p --no-session --no-title --max-time 10m [--model <model>]` | 不开内置工具，只用 memory MCP（实施时实测 `--no-tools` 下 MCP 是否可用） |
 
-`<model>` 默认取各宿主的低价模型，可在配置中改。具体命令行参数在实施前逐个实测确定。
+`<model>` 默认：Claude Code 为 `haiku`，omp 为 `@smol`，Codex 用其默认模型。可在配置中改。
 
 ## 6. 记忆格式
 

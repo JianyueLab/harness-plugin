@@ -361,7 +361,7 @@ export function loadWakaConfig({
       if (!patterns || patterns.length === 0 || patterns.some((pattern) => typeof pattern !== "string" || /\[\[:/.test(pattern))) {
         throw new Error("unsupported privacy value");
       }
-      hideFileNames = patterns.map((pattern) => new RegExp(pattern, "u"));
+      hideFileNames = patterns.map((pattern) => new RegExp(pattern, cfg.hide_file_names != null ? "iu" : "u"));
     } catch {
       // An unsupported POSIX class or malformed regex must never expose paths.
       hideFileNames = true;

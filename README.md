@@ -276,7 +276,8 @@ events reported, not wrong numbers reported as if they were right.
 **Hooks retain discoveries even during contention.** Main and separate subagent
 transcripts enter a local immutable inbox before lock acquisition. The next
 lock holder merges that inbox and sweeps tracked transcripts with unread work,
-newest first, capped at 25 additional units per run.
+newest first, capped at 25 additional eligible units per run. Excluded transcripts
+do not consume sweep slots, including after a Retry-After pause.
 
 **Repeated requests are deduplicated at both ends.** Claude Code writes one
 transcript entry per content block, so a single API request that produced text
@@ -616,11 +617,12 @@ placeholder that keeps only the file's own extension (`agent.go` becomes
 is not sent. The project name is still reported. This matches `wakatime-cli`,
 except that it sends `HIDDEN.env` for a dotfile. `hide_branch_names` and
 `hide_project_names` are not read.
-Multiline `hide_file_names` regex lists hide matching paths and suppress the
-branch on those file heartbeats. JSON `hideFileNames` also accepts an array of
-patterns. Matching uses JavaScript regex syntax; malformed expressions,
-unsupported POSIX character classes and unsupported values stop reporting
-with a configuration error. They never silently disable privacy.
+Multiline `hide_file_names` regex lists hide matching paths case-insensitively
+and suppress the branch on those file heartbeats. JSON `hideFileNames` also
+accepts an array of patterns and keeps JavaScript's case-sensitive matching.
+Both use JavaScript regex syntax; malformed expressions, unsupported POSIX
+character classes and unsupported values stop reporting with a configuration
+error. They never silently disable privacy.
 
 **No API key anywhere means this tool quietly does nothing.** Not a crash,
 not a log line on every single run — one line logged the first time, then

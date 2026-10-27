@@ -81,7 +81,7 @@ export const keyOf = (event) => event.requestId || event.messageId;
  * and later grows is re-read from the start, and the portal stores none of it
  * twice.
  */
-function sweepTargets(host, store, state, explicit, sweep) {
+function sweepTargets(host, store, state, explicit, sweep, eligible) {
   const now = Date.now();
   const softCutoff = now - STATE_RETENTION_DAYS * 86_400_000;
   const hardCutoff = now - MAX_EVENT_AGE_DAYS * 86_400_000;
@@ -98,7 +98,7 @@ function sweepTargets(host, store, state, explicit, sweep) {
       delete state.files[unit];
       continue;
     }
-    if (!sweep || explicit.includes(unit)) continue;
+    if (!sweep || explicit.includes(unit) || !eligible(unit)) continue;
     if (probe.pending > 0) stale.push({ unit, mtimeMs: probe.mtimeMs });
   }
 
@@ -109,7 +109,7 @@ function sweepTargets(host, store, state, explicit, sweep) {
       `sweep: ${stale.length - picked.length} stale ${host.unitLabel}(s) held over to the next run`,
     );
   }
-  return [...explicit, ...picked.map((s) => s.unit)];
+  return [...explicit.filter(eligible), ...picked.map((s) => s.unit)];
 }
 
 /**
@@ -168,10 +168,10 @@ export async function report(host, store, config, units, { sweep = false } = {})
     }
   }
   const explicit = [...new Set([...units, ...discoveries.flatMap((entry) => entry.units)])];
-  const targets = sweepTargets(host, store, state, explicit, sweep).filter((unit) =>
+  const eligible = (unit) =>
     !(config.excludedTranscripts ?? []).includes(unit) &&
-    (!state.files[unit]?.excluded || config.reportGatewayTraffic || (config.includedTranscripts ?? []).includes(unit)),
-  );
+    (!state.files[unit]?.excluded || config.reportGatewayTraffic || (config.includedTranscripts ?? []).includes(unit));
+  const targets = sweepTargets(host, store, state, explicit, sweep, eligible);
 
   const persistState = () => {
     const stateAfter = JSON.stringify(state, null, 2);

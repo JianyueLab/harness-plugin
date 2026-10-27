@@ -17,6 +17,16 @@
         "usage",
         "metrics"
       ]
+    },
+    {
+      "name": "jyl-memory",
+      "source": "./plugins/jyl-memory",
+      "description": "Recalls JianyueLab memory at session start and distils each session into it when the session ends.",
+      "version": "27.0.0",
+      "category": "productivity",
+      "tags": [
+        "memory"
+      ]
     }
   ]
 }

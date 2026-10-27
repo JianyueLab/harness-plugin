@@ -1,0 +1,11 @@
+{
+  "name": "jianyuelab-claude",
+  "plugins": [
+    {
+      "name": "jyl-memory",
+      "source": { "source": "local", "path": "./plugins/jyl-memory" },
+      "policy": { "installation": "AVAILABLE", "authentication": "ON_INSTALL" },
+      "category": "Productivity"
+    }
+  ]
+}

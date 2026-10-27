@@ -35,7 +35,9 @@ function spawnWorker(payload) {
   const env = { ...process.env };
   delete env.JYL_MEMORY_DISTILL;
   delete env.JYL_MEMORY_PAYLOAD;
-  spawn(process.execPath, [WORKER, JSON.stringify(payload)], { detached: true, stdio: 'ignore', env }).unref();
+  spawn(process.execPath, [WORKER, JSON.stringify(payload)], { detached: true, stdio: 'ignore', env })
+    .on('error', () => {})
+    .unref();
 }
 
 async function readStdin() {
@@ -44,7 +46,7 @@ async function readStdin() {
   return text;
 }
 
-if (process.argv[1] === fileURLToPath(import.meta.url)) {
+if (import.meta.main ?? process.argv[1]?.endsWith('/src/hook.mjs')) {
   try {
     const recallText = readFileSync(new URL('../prompts/recall.md', import.meta.url), 'utf8');
     await hook(process.argv.slice(2), { env: process.env, readStdin, stdout: process.stdout, spawnWorker, recallText });

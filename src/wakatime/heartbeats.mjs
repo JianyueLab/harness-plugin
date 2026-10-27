@@ -43,9 +43,11 @@ export function heartbeatsFrom(payload, { project, branch, hideFileNames } = {})
     // that before touching `.path`, or a malformed batch throws and the hook
     // loses every heartbeat in the run, not just the bad entry.
     if (!call || typeof call.path !== "string" || !call.path) continue;
+    const hidden = hideFileNames === true ||
+      (Array.isArray(hideFileNames) && hideFileNames.some((pattern) => pattern.test(call.path.replace(/\\/g, "/"))));
 
     const beat = {
-      entity: hideFileNames ? obfuscate(call.path) : call.path,
+      entity: hidden ? obfuscate(call.path) : call.path,
       type: "file",
       time: call.at,
       category: CATEGORY,
@@ -54,7 +56,7 @@ export function heartbeatsFrom(payload, { project, branch, hideFileNames } = {})
     if (project) beat.project = project;
     // wakatime-cli drops the branch when hide_file_names applies and no
     // hide_branch_names is configured; this tool reads no hide_branch_names.
-    if (branch && !hideFileNames) beat.branch = branch;
+    if (branch && !hidden) beat.branch = branch;
     const lang = languageFor(call.path);
     if (lang) beat.language = lang;
     beats.push(beat);

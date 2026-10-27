@@ -54,6 +54,8 @@ export function loadConfig({ files = [] } = {}) {
      * reporting it again would count the same tokens under both sources.
      */
     reportGatewayTraffic: body.reportGatewayTraffic === true,
+    excludedTranscripts: Array.isArray(body.excludedTranscripts) ? body.excludedTranscripts.filter((unit) => typeof unit === "string") : [],
+    includedTranscripts: Array.isArray(body.includedTranscripts) ? body.includedTranscripts.filter((unit) => typeof unit === "string") : [],
   };
 }
 

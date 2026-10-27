@@ -136,9 +136,9 @@ export function readViaCli(dbFile, afterIdx, { readonly = true } = {}) {
   }
 }
 
-export function readGenMetadata(dbFile, afterIdx) {
+export function readGenMetadata(dbFile, afterIdx, { backend: requestedBackend, tempDir } = {}) {
   if (!fs.existsSync(dbFile)) return [];
-  const backend = pickBackend();
+  const backend = requestedBackend ?? pickBackend();
   if (!backend) return null;
 
   // Try direct read first (read-only against agy's original)
@@ -168,7 +168,7 @@ export function readGenMetadata(dbFile, afterIdx) {
   // copy will also fail and return null. All filesystem operations are
   // guarded by this try/catch/finally to ensure cleanup and never throw.
   const tmpPath = path.join(
-    os.tmpdir(),
+    tempDir ?? os.tmpdir(),
     `jyl-sqlite-read-${Math.random().toString(36).slice(2)}.db`,
   );
   const tmpWal = tmpPath + "-wal";

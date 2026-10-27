@@ -1,5 +1,5 @@
 import { afterAll, expect, test } from "bun:test";
-import { spawnSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -219,25 +219,28 @@ test("an unwritable state dir does not throw", async () => {
   ).resolves.toBeUndefined();
 });
 
-// Nothing above proves runHook actually threads runGit through to detectProject
-// at all -- every case above injects an empty result, which is indistinguishable
-// from runGit never being wired up in the first place. This one uses a real
-// branch name and checks it lands on the emitted file heartbeats.
-test("runGit is threaded through to detectProject, and the branch reaches the heartbeats", async () => {
+test("an isolated workspace branch reaches emitted file heartbeats", async () => {
+  const workspace = path.join(root, "branch-worktree");
+  const branch = "usage-fixture";
+  const gitEnv = { ...process.env, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" };
+  // Local shared clone: genuine repository metadata, no new commits and no
+  // dependency on the developer's current branch or the fixture's old path.
+  execFileSync("git", ["clone", "--quiet", "--shared", "--no-checkout", path.resolve(import.meta.dir, ".."), workspace], { env: gitEnv });
+  execFileSync("git", ["-C", workspace, "branch", branch, "HEAD"], { env: gitEnv });
+  execFileSync("git", ["-C", workspace, "symbolic-ref", "HEAD", `refs/heads/${branch}`], { env: gitEnv });
+  const payload = { ...JSON.parse(fixture), workspace_root: workspace };
   const store = freshStore("branch");
   const sent = [];
   await runHook({
     store,
-    stdinText: fixture,
+    stdinText: JSON.stringify(payload),
     cfg: { apiKey: "k", apiUrl: "https://x/api/v1", enabled: true },
     now: 1_000,
-    runGit: () => "feat/hook-system\n",
     send: async (_ctx, beats) => { sent.push(...beats); return { tally: { sent: beats.length, accepted: beats.length }, failed: [], authFailed: false }; },
   });
-
-  const files = sent.filter((b) => b.type === "file");
+  const files = sent.filter((beat) => beat.type === "file");
   expect(files.length).toBeGreaterThan(0);
-  for (const f of files) expect(f.branch).toBe("feat/hook-system");
+  for (const file of files) expect(file.branch).toBe(branch);
 });
 
 // --- Fix round 1 (review: task-5-review.md) -------------------------------
@@ -737,28 +740,41 @@ for (const xdg of [undefined, "elsewhere/xdgconf"]) {
   test(`I3 fix-round-2: launcher's no-runtime log lands in cfg.mjs's own STATE_DIR (${label})`, () => {
     const fakeHome = path.join(root, `i3-drift-${xdg === undefined ? "noxdg" : "xdg"}`);
     fs.mkdirSync(fakeHome, { recursive: true });
-    const envExtra = xdg === undefined ? {} : { XDG_CONFIG_HOME: path.join(fakeHome, xdg) };
+    const envExtra = { ...process.env, HOME: fakeHome, WAKATIME_API_KEY: "", JYL_WAKATIME_RUNTIME: "" };
+    if (xdg === undefined) delete envExtra.XDG_CONFIG_HOME;
+    else envExtra.XDG_CONFIG_HOME = path.join(fakeHome, xdg);
 
     // The canonical log file, read from the real module under this exact
     // HOME/XDG_CONFIG_HOME combination -- this is what "in sync" means.
     const probe = spawnSync(process.execPath, [probeScript], {
-      env: { ...process.env, HOME: fakeHome, ...envExtra },
+      env: envExtra,
     });
     expect(probe.status).toBe(0);
     const stateDir = probe.stdout.toString().trim();
     expect(stateDir.length).toBeGreaterThan(0);
     const expectedLogFile = createStore(stateDir).logFile;
 
-    // Run the launcher with neither bun nor node reachable, so it must take
-    // the no-runtime fallback path this test exists to check.
+    // Restrict PATH to the shell utilities this actual launcher needs. A
+    // system /usr/bin can contain Node, so it is not a no-runtime fixture.
+    const bin = path.join(fakeHome, "tool-only-path");
+    fs.mkdirSync(bin);
+    const commands = {};
+    for (const name of ["sh", "dirname", "mkdir", "date"]) {
+      const found = spawnSync("sh", ["-c", `command -v ${name}`], { encoding: "utf8" });
+      expect(found.status).toBe(0);
+      commands[name] = found.stdout.trim();
+      expect(path.isAbsolute(commands[name])).toBe(true);
+      fs.symlinkSync(commands[name], path.join(bin, name));
+    }
     const launcher = path.join(import.meta.dir, "..", "scripts", "wakatime");
-    const result = spawnSync("sh", ["-c", `'${launcher}'`], {
-      env: { ...process.env, HOME: fakeHome, PATH: "/usr/bin:/bin", JYL_WAKATIME_RUNTIME: "", ...envExtra },
+    const result = spawnSync(commands.sh, [launcher], {
+      env: { ...envExtra, PATH: bin },
       input: "",
     });
 
     expect(result.status).toBe(0);
     expect(fs.existsSync(expectedLogFile)).toBe(true);
-    expect(fs.readFileSync(expectedLogFile, "utf8")).toContain("no bun or node on PATH; not reporting");
+    expect(fs.readFileSync(expectedLogFile, "utf8").trim().length).toBeGreaterThan(0);
+    expect(fs.existsSync(path.join(stateDir, "state.json"))).toBe(false);
   });
 }

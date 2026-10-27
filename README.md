@@ -136,7 +136,9 @@ Optional keys in the config file:
 | Key | Default | Meaning |
 |---|---|---|
 | `enabled` | `true` | `false` turns the plugin off without uninstalling it (`JYL_USAGE_DISABLED=1` does the same). |
-| `reportGatewayTraffic` | `false` | Claude Code only — report even when this session already talks to the portal directly; see below. `agy` cannot talk to the portal in the first place, so this key does nothing there. |
+| `reportGatewayTraffic` | `false` | Claude Code only — include even transcripts observed under a portal-routed hook. Imported rows do not debit gateway allowance. |
+| `excludedTranscripts` | `[]` | Absolute transcript paths to exclude from hook reporting, sweeps and backfills. Explicit exclusion wins. Paths stay local. |
+| `includedTranscripts` | `[]` | Absolute transcript paths to include despite an observed gateway exclusion. Paths stay local. |
 
 **Until it is configured the plugin does nothing at all**, silently. An install
 without a key is inert, not noisy.
@@ -167,10 +169,9 @@ on this host (the reporter defaults to Claude Code):
 ```
 
 **Codex CLI** — `--host codex` reads Codex's rollout files under
-`~/.codex/sessions/` and keeps its state in `~/.codex/jyl-usage/`. Events go
-out as `source: "codex"`, which `llm-web` must accept before they are stored;
-until then they wait in the spool, as described for Antigravity below. This
-repo ships no Codex hook manifest, so run it by hand or from your own hook:
+`~/.codex/sessions/` and keeps its state in `~/.codex/jyl-usage/`. Events use
+`source: "codex"`, one of the portal's accepted sources. This repository ships
+no Codex hook manifest, so run it by hand or from your own hook:
 
 ```sh
 ./scripts/run --host codex --status
@@ -198,6 +199,7 @@ be there) and says to add `--host antigravity`.
 Claude Code turn ends
   └─ Stop hook (async)  →  scripts/run  →  src/reporter.mjs
         reads $transcript_path from the last recorded byte offset
+        includes $agent_transcript_path for separate subagent files
         sweeps every other tracked transcript that has grown since
         keeps assistant entries that carry message.usage
         POST <portal>/v1/usage/ingest   { source: "claude-code", events: [...] }
@@ -240,25 +242,19 @@ the dedup window, not the spool.
 
 | File | Holds |
 |---|---|
-| `state.json` | Per-unit cursor — a byte offset for Claude Code, a `gen_metadata` row index for Antigravity — so each line or row is read exactly once. Rewritten only when a cursor actually moves. |
+| `state.json` | Per-unit cursor and observed gateway exclusion. Claude Code/Codex use byte offsets; Antigravity uses generation row indices. |
 | `seen` | The dedup window — the last few thousand request ids sent, newest last. Its own file because `state.json` is touched every turn and this is the part that grows. |
-| `spool.jsonl` | Events read but not yet accepted. Retried on every later run. |
+| `spool.jsonl` | Up to 5,000 retry events. Unread overflow stays behind the source cursor for a later pass. |
 | `log` | What happened, capped at 256 KB. |
-| `lock` | Serialises concurrent sessions; stale after 60 s. |
+| `lock` | Current process owner. Dead owners older than 60 s may be reclaimed; live paused owners are not stolen. |
+| `lock-turns/` | Unique contender tickets serialize acquisition and stale-lock reclamation. Dead-process tickets are removed. |
+| `pending-units/` | Immutable hook discoveries and observed exclusions, merged by the next lock holder. |
 
 #### Things worth knowing
 
-**Reporting Antigravity usage needs a portal change that has not shipped
-yet.** The portal's ingest route only accepts a fixed list of `source`
-values, and `antigravity` is not on it until `llm-web` deploys that addition
-— a separate repo, a separate PR. Until then, every upload this host makes
-gets a 400 back. Nothing is lost: the reporter recognises that specific
-rejection and spools it for retry rather than dropping it, the same as a
-revoked API key, so those events are sent — once, deduplicated, in full — the
-first time a hook or `flush` runs after the portal catches up. But installing
-today gets you a growing queue, not a report: `--status --host antigravity`
-will show events awaiting retry that stay queued for a while, not a source
-freshly visible in the portal's reports.
+**The portal accepts four imported sources:** `claude-code`, `grok-build`,
+`antigravity` and `codex`. A server that does not recognize a source returns
+`400 invalid_source`; the reporter queues that response for retry.
 
 **`agy`'s hooks block, so the work is detached.** Unlike Claude Code's hooks,
 `agy` has no `async` flag — a `Stop` handler runs synchronously and holds up
@@ -277,16 +273,13 @@ seen — and a row that fails either is skipped and logged, never guessed at.
 If a future `agy` renumbers these fields, `--status` and the log show *fewer*
 events reported, not wrong numbers reported as if they were right.
 
-**Nothing waits for someone to notice it.** Reading only the transcript named
-in the hook payload left usage stranded whenever a run had no chance to finish
-the file: a hook that lost the lock to a concurrent session, or a session killed
-before its last turn was read. Those bytes were not late, they were lost —
-`backfill` could recover them, but only for people who knew to run it. Every run
-now also sweeps the transcripts it already tracks for bytes nothing came back
-for, newest first, capped per run so no single hook does an unbounded amount of
-work.
+**Hooks retain discoveries even during contention.** Main and separate subagent
+transcripts enter a local immutable inbox before lock acquisition. The next
+lock holder merges that inbox and sweeps tracked transcripts with unread work,
+newest first, capped at 25 additional eligible units per run. Excluded transcripts
+do not consume sweep slots, including after a Retry-After pause.
 
-**Duplicates are impossible, by design at both ends.** Claude Code writes one
+**Repeated requests are deduplicated at both ends.** Claude Code writes one
 transcript entry per content block, so a single API request that produced text
 *and* a tool call appears twice with the same `requestId`. A line written before
 the response finished carries the output tokens counted so far, so the lines of
@@ -296,28 +289,41 @@ next request has started, or the transcript has not been written for 30
 minutes. Until then the cursor stays at its first line and the next run reads
 it again whole.
 Resuming a session goes further and copies its whole history into a new
-transcript file. The plugin filters both against one global dedup window — per
-transcript would not have recognised the fork — and the portal deduplicates on
-request id under a unique index regardless, which is what makes retrying safe
-and `backfill` safe to run as often as you like.
+transcript file. The plugin filters both against one local dedup window — per
+transcript would not have recognised the fork. The portal claims a receipt
+keyed by `(source, user_aid, request_id)` in the same transaction as the usage
+event insert. The same request ID may be imported by different accounts or
+sources; retries within that receipt scope do not create another event.
 
-**A failed upload never loses usage.** Events go to the spool and the cursor
-still advances, so the same lines or rows are not read forever. Both writes
-happen after the upload, in the order spool-then-cursor, so every crash window
-re-reads rather than dropping — and a re-read is free, because the portal
-stores it once.
+**Retry delivery also depends on the queue and cursors.** Receipt deduplication
+does not recover an event discarded locally or a transcript never discovered.
+Retained events are retried on subsequent runs. Permanent payload rejections
+are logged and dropped.
+Each pass reads at most the retry queue's free capacity. Source cursors stop
+before unread overflow, including within a single transcript or conversation.
+An HTTP 429 stops the remaining batches in that pass and persists its
+`Retry-After` deadline. Hooks, backfills and flushes retain queued events and
+discoveries without uploading before that time. The delay is bounded from one
+second to one hour; an absent or malformed header defaults to one minute.
+Run another hook, backfill or flush after the deadline to continue.
 
 **A wrong key is retried; a bad payload is not.** `401`/`403`/`429`/`5xx` spool
 for later, because someone will fix the key — an unrecognised `source` (above)
 gets the same treatment. Anything else is logged and dropped, because retrying
 it forever would only grow the spool.
 
-**Sessions already pointed at the portal are skipped — on Claude Code only.**
-If `ANTHROPIC_BASE_URL` names the same host as `baseUrl`, the portal's `/v1`
-proxy metered those turns on the way past, and reporting them again would
-count the same tokens under two sources. Set `"reportGatewayTraffic": true` to
-override. `agy` speaks Google's Code Assist protocol, which `/v1` does not
-serve, so there is no way for it to already be metered and nothing to skip.
+**Observed portal-routed transcripts remain excluded — Claude Code only.**
+A hook whose `ANTHROPIC_BASE_URL` names the configured portal host records an
+exclusion for its main and subagent transcripts. Later direct-context sweeps
+and backfills honor it. `"includedTranscripts"` or `"reportGatewayTraffic": true`
+can explicitly include them; `"excludedTranscripts"` always takes precedence.
+
+Unknown historical transcripts cannot be classified from the current shell's
+environment. Backfill includes them unless explicitly excluded. Choose local
+inclusion/exclusion paths when their provenance is known. An observed routing
+host does not prove which account received a real gateway charge. Duplicate
+aggregate usage is possible only when the same turns were metered for the same
+portal account. Imported usage never consumes gateway allowance.
 
 **Locally fabricated messages are ignored.** Claude Code writes
 `model: "<synthetic>"` entries for API errors and interrupts; no request was
@@ -363,10 +369,10 @@ Response — per-event, so one malformed entry never blocks its neighbours:
 ```
 
 Max 500 events per request (a larger batch is rejected, not truncated).
-`source` is a whitelist on the portal's side — as of this writing it accepts
-`"claude-code"` but not yet `"antigravity"` (see *Things worth knowing*
-above) — and an unrecognised value there gets a 400 that this plugin treats
-as a transient failure and spools, not a dropped payload. The route is
+The portal accepts `claude-code`, `grok-build`, `antigravity` and `codex`.
+An unrecognised source gets `400 invalid_source`, which the plugin queues for
+retry. Deduplication uses receipts scoped to `(source, user_aid, request_id)`.
+The route is
 otherwise deliberately ungated: it spends nothing, so refusing a report
 because the reporter is over its allowance would only throw away the evidence
 that they are.
@@ -611,6 +617,12 @@ placeholder that keeps only the file's own extension (`agent.go` becomes
 is not sent. The project name is still reported. This matches `wakatime-cli`,
 except that it sends `HIDDEN.env` for a dotfile. `hide_branch_names` and
 `hide_project_names` are not read.
+Multiline `hide_file_names` regex lists hide matching paths case-insensitively
+and suppress the branch on those file heartbeats. JSON `hideFileNames` also
+accepts an array of patterns and keeps JavaScript's case-sensitive matching.
+Both use JavaScript regex syntax; malformed expressions, unsupported POSIX
+character classes and unsupported values stop reporting with a configuration
+error. They never silently disable privacy.
 
 **No API key anywhere means this tool quietly does nothing.** Not a crash,
 not a log line on every single run — one line logged the first time, then

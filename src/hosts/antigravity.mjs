@@ -115,7 +115,7 @@ export const host = {
    * conversation that skips every row is not indistinguishable from an idle
    * machine just because zero events made it out the other end.
    */
-  read(unit, entry, log) {
+  read(unit, entry, log, maxEvents = Infinity) {
     let stat;
     try {
       stat = fs.statSync(unit);
@@ -135,6 +135,7 @@ export const host = {
     let highest = after;
     let skippedThisRead = 0;
     for (const row of rows) {
+      if (events.length >= maxEvents) break;
       highest = Math.max(highest, row.idx);
       const event = eventFromBlob(row.data, { ts: stamps.get(row.idx) ?? fallback });
       if (event) events.push(event);
@@ -150,7 +151,8 @@ export const host = {
       );
     }
     const skipped = (entry.skipped ?? 0) + skippedThisRead;
-    return { events, entry: { idx: highest, mtimeMs: stat.mtimeMs, skipped } };
+    const drained = highest >= rows[rows.length - 1].idx;
+    return { events, entry: { idx: highest, mtimeMs: drained ? stat.mtimeMs : (entry.mtimeMs ?? 0), skipped } };
   },
 
   // `agy` cannot be pointed at the portal — it speaks Google's Code Assist

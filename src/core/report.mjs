@@ -27,6 +27,7 @@
  */
 
 import { upload } from "./upload.mjs";
+import { MAX_SPOOL_EVENTS } from "./store.mjs";
 
 /** Stale units drained per catch-up sweep. The rest wait for the next run. */
 const MAX_SWEEP_FILES = 25;
@@ -80,7 +81,7 @@ export const keyOf = (event) => event.requestId || event.messageId;
  * and later grows is re-read from the start, and the portal stores none of it
  * twice.
  */
-function sweepTargets(host, store, state, explicit, sweep) {
+function sweepTargets(host, store, state, explicit, sweep, eligible) {
   const now = Date.now();
   const softCutoff = now - STATE_RETENTION_DAYS * 86_400_000;
   const hardCutoff = now - MAX_EVENT_AGE_DAYS * 86_400_000;
@@ -97,7 +98,7 @@ function sweepTargets(host, store, state, explicit, sweep) {
       delete state.files[unit];
       continue;
     }
-    if (!sweep || explicit.includes(unit)) continue;
+    if (!sweep || explicit.includes(unit) || !eligible(unit)) continue;
     if (probe.pending > 0) stale.push({ unit, mtimeMs: probe.mtimeMs });
   }
 
@@ -108,7 +109,7 @@ function sweepTargets(host, store, state, explicit, sweep) {
       `sweep: ${stale.length - picked.length} stale ${host.unitLabel}(s) held over to the next run`,
     );
   }
-  return [...explicit, ...picked.map((s) => s.unit)];
+  return [...explicit.filter(eligible), ...picked.map((s) => s.unit)];
 }
 
 /**
@@ -127,10 +128,11 @@ function sweepTargets(host, store, state, explicit, sweep) {
  * than this generic pass having to know host-specific things to say on a
  * host's behalf. A host that has nothing to say ignores the extra argument.
  */
-function collect(host, store, state, unit) {
-  const { events, entry } = host.read(unit, state.files[unit] ?? {}, store.log);
+function collect(host, store, state, unit, limit) {
+  const previous = state.files[unit] ?? {};
+  const { events, entry } = host.read(unit, previous, store.log, limit);
   if (entry === null) delete state.files[unit];
-  else state.files[unit] = entry;
+  else state.files[unit] = { ...entry, ...(previous.excluded ? { excluded: true } : {}) };
   return events;
 }
 
@@ -158,10 +160,41 @@ export async function report(host, store, config, units, { sweep = false } = {})
   const carried = state.carried ?? [];
   delete state.carried;
 
-  const targets = sweepTargets(host, store, state, units, sweep);
+  const discoveries = store.pendingUnits();
+  for (const discovery of discoveries) {
+    for (const unit of discovery.units) {
+      state.files[unit] ??= {};
+      if (discovery.excluded) state.files[unit].excluded = true;
+    }
+  }
+  const explicit = [...new Set([...units, ...discoveries.flatMap((entry) => entry.units)])];
+  const eligible = (unit) =>
+    !(config.excludedTranscripts ?? []).includes(unit) &&
+    (!state.files[unit]?.excluded || config.reportGatewayTraffic || (config.includedTranscripts ?? []).includes(unit));
+  const targets = sweepTargets(host, store, state, explicit, sweep, eligible);
 
+  const persistState = () => {
+    const stateAfter = JSON.stringify(state, null, 2);
+    if (stateAfter !== stateBefore) store.saveState(state);
+    store.acknowledgeUnits(discoveries);
+  };
+  // Backfill discoveries remain tracked while uploads wait for Retry-After.
+  for (const unit of targets) state.files[unit] ??= {};
+  const pending = store.readSpool();
+  if (typeof state.retryAt === "number" && state.retryAt > Date.now()) {
+    persistState();
+    return { sent: 0, accepted: 0, duplicates: 0, rejected: 0, spooled: pending.length, known: 0 };
+  }
+  delete state.retryAt;
+  let headroom = Math.max(0, MAX_SPOOL_EVENTS - pending.length);
   const found = [];
-  for (const unit of targets) found.push(...collect(host, store, state, unit));
+  for (const unit of targets) {
+    if (headroom === 0) continue;
+    const events = collect(host, store, state, unit, headroom);
+    if (events.length > headroom) throw new RangeError("host reader exceeded its event budget");
+    found.push(...events);
+    headroom -= events.length;
+  }
 
   // The dedup window is only read when there is something to check against it,
   // which leaves a hook with no new turns at a probe per tracked unit and
@@ -190,11 +223,9 @@ export async function report(host, store, config, units, { sweep = false } = {})
   // plugin paid on a turn where it had nothing to do.
   const persist = () => {
     if (dedupWindow) store.persistSeen(dedupWindow, added);
-    const stateAfter = JSON.stringify(state, null, 2);
-    if (stateAfter !== stateBefore) store.saveState(state);
+    persistState();
   };
 
-  const pending = store.readSpool();
   const all = [...pending, ...fresh];
   if (all.length === 0) {
     // Still record the cursors: the lines just read were real, they simply
@@ -203,11 +234,12 @@ export async function report(host, store, config, units, { sweep = false } = {})
     return { sent: 0, accepted: 0, duplicates: 0, rejected: 0, spooled: 0, known };
   }
 
-  const { tally, failed } = await upload(
+  const { tally, failed, retryAt } = await upload(
     { config, source: host.source, client: host.client, log: store.log },
     all,
   );
   store.writeSpool(failed);
+  if (retryAt !== null) state.retryAt = retryAt;
   persist();
 
   store.log(

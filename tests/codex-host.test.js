@@ -40,6 +40,20 @@ test("read advances the byte offset and only consumes whole lines", () => {
   expect(second.events[0].inputTokens).toBe(200);
 });
 
+test("a bounded read keeps Codex ordinal and cumulative baseline for the next pass", () => {
+  const file = write("bounded", [
+    meta("bounded"), turnCtx("gpt-5.5"),
+    tokenCount(usage(100, 0, 20), usage(100, 0, 20)),
+    tokenCount(usage(300, 0, 60), usage(200, 0, 40)),
+  ]);
+  const first = host.read(file, {}, undefined, 1);
+  expect(first.events.map((event) => event.requestId)).toEqual(["codex:bounded:0"]);
+  expect(host.probe(file, first.entry).pending).toBeGreaterThan(0);
+  const second = host.read(file, first.entry, undefined, 1);
+  expect(second.events[0]).toMatchObject({ requestId: "codex:bounded:1", inputTokens: 200, outputTokens: 40 });
+  expect(host.probe(file, second.entry).pending).toBe(0);
+});
+
 test("a partial trailing line is not consumed", () => {
   const file = write("cccc", [meta("cccc"), turnCtx("gpt-5.5")]);
   const whole = fs.statSync(file).size;                            // 完整行的字节数

@@ -79,6 +79,18 @@ test("reads nothing twice", () => {
   expect(host.read(file, first.entry).events).toHaveLength(0);
 });
 
+test("a bounded read retains Antigravity pending work until every row is consumed", () => {
+  const file = conversation("bounded", [1, 2, 3]);
+  const first = host.read(file, {}, undefined, 1);
+  expect(first.events.map((event) => event.requestId)).toEqual(["conv-1"]);
+  expect(host.probe(file, first.entry).pending).toBeGreaterThan(0);
+  const second = host.read(file, first.entry, undefined, 1);
+  expect(second.events.map((event) => event.requestId)).toEqual(["conv-2"]);
+  const third = host.read(file, second.entry, undefined, 1);
+  expect(third.events.map((event) => event.requestId)).toEqual(["conv-3"]);
+  expect(host.probe(file, third.entry).pending).toBe(0);
+});
+
 test("falls back to the database mtime when the transcript has no such step", () => {
   const file = conversation("c3", [5], []);
   // Days in the past, not "moments ago" — a fixture created just before the

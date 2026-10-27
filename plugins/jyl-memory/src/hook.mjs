@@ -15,7 +15,7 @@ export async function hook(argv, { env, readStdin, stdout, spawnWorker, recallTe
   if (event !== 'end') return 0;
   let payload;
   try {
-    payload = JSON.parse(await readStdin());
+    payload = JSON.parse(env.JYL_MEMORY_PAYLOAD || (await readStdin()));
   } catch {
     return 0;
   }
@@ -34,6 +34,7 @@ export async function hook(argv, { env, readStdin, stdout, spawnWorker, recallTe
 function spawnWorker(payload) {
   const env = { ...process.env };
   delete env.JYL_MEMORY_DISTILL;
+  delete env.JYL_MEMORY_PAYLOAD;
   spawn(process.execPath, [WORKER, JSON.stringify(payload)], { detached: true, stdio: 'ignore', env }).unref();
 }
 

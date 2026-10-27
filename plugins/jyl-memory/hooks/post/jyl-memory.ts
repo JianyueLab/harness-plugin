@@ -7,9 +7,12 @@ const RECALL = readFileSync(new URL("../../prompts/recall.md", import.meta.url),
 
 function distill(file: string, sessionId: string | null): void {
   const payload = JSON.stringify({ transcript_path: file, session_id: sessionId, cwd: process.cwd() });
-  const child = spawn(RUN, ["end", "--host", "omp"], { detached: true, stdio: ["pipe", "ignore", "ignore"] });
+  const child = spawn(RUN, ["end", "--host", "omp"], {
+    detached: true,
+    stdio: "ignore",
+    env: { ...process.env, JYL_MEMORY_PAYLOAD: payload },
+  });
   child.on("error", () => {});
-  child.stdin.end(payload);
   child.unref();
 }
 

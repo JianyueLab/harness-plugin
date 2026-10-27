@@ -111,4 +111,18 @@ describe('runHost', () => {
       cleanup(dir);
     }
   });
+
+  test('a host that ignores SIGTERM is killed after the grace period', async () => {
+    const dir = tempDir('runhost');
+    try {
+      const script = join(dir, 'stubborn.sh');
+      writeFileSync(script, "#!/bin/sh\ntrap '' TERM\nwhile true; do sleep 1; done\n", { mode: 0o755 });
+      const started = Date.now();
+      const code = await runHost(script, [], '', { env: process.env, cwd: dir, timeoutMs: 200, killGraceMs: 200 });
+      expect(code).not.toBe(0);
+      expect(Date.now() - started).toBeLessThan(2000);
+    } finally {
+      cleanup(dir);
+    }
+  }, 5000);
 });

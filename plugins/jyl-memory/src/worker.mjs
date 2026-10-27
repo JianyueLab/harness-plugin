@@ -14,6 +14,7 @@ import { loadState, saveState, withLock } from './state.mjs';
 export const PENDING_FRESH_MS = 15 * 60_000;
 export const HOST_TIMEOUT_MS = 10 * 60_000;
 export const LOG_MAX_BYTES = 256 * 1024;
+export const KILL_GRACE_MS = 10_000;
 
 const READERS = { 'claude-code': claudeCode, codex, omp };
 
@@ -108,7 +109,7 @@ export async function distill(payload, { env, home, now, runHost: run, promptTex
   }
 }
 
-export function runHost(cmd, args, input, { env, cwd, timeoutMs = HOST_TIMEOUT_MS }) {
+export function runHost(cmd, args, input, { env, cwd, timeoutMs = HOST_TIMEOUT_MS, killGraceMs = KILL_GRACE_MS }) {
   return new Promise((resolve) => {
     let child;
     try {
@@ -117,14 +118,24 @@ export function runHost(cmd, args, input, { env, cwd, timeoutMs = HOST_TIMEOUT_M
       resolve(127);
       return;
     }
-    const timer = setTimeout(() => child.kill('SIGTERM'), timeoutMs);
-    child.on('error', () => {
+    let timedOut = false;
+    let grace;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      child.kill('SIGTERM');
+      grace = setTimeout(() => child.kill('SIGKILL'), killGraceMs);
+    }, timeoutMs);
+    const clear = () => {
       clearTimeout(timer);
+      clearTimeout(grace);
+    };
+    child.on('error', () => {
+      clear();
       resolve(127);
     });
     child.on('close', (code) => {
-      clearTimeout(timer);
-      resolve(code ?? 1);
+      clear();
+      resolve(timedOut ? 124 : (code ?? 1));
     });
     child.stdin.on('error', () => {});
     child.stdin.end(input);

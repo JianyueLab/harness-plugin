@@ -32,9 +32,11 @@ export default function jylMemory(pi: any): void {
     }
   });
 
-  pi.on("session_switch", async (event: any, ctx: any) => {
+  const distillPrevious = async (event: any, ctx: any) => {
     if (ctx?.agent?.kind !== "sub" && event?.previousSessionFile) distill(event.previousSessionFile, null);
-  });
+  };
+  pi.on("session_switch", distillPrevious);
+  pi.on("session_branch", distillPrevious);
 
   pi.on("session_shutdown", async (_event: unknown, ctx: any) => {
     if (ctx?.agent?.kind === "sub") return;

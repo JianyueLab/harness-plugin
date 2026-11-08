@@ -23,7 +23,7 @@ export function configPath(env, home) {
 
 function expandHome(path, home) {
   if (path === '~') return home;
-  if (path.startsWith('~/')) return join(home, path.slice(2));
+  if (path.startsWith('~/')) return resolve(home, path.slice(2));
   return resolve(path);
 }
 

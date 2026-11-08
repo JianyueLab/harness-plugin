@@ -51,6 +51,8 @@ describe('loadConfig', () => {
     const id = '11111111-1111-4111-8111-111111111111';
     write({ projects: { '~/work/app': id, [join(home, 'work/app/')]: id } });
     expect(() => loadConfig({ env: {}, home })).toThrow(new ConfigError(`projects has two entries for ${join(home, 'work/app')}`));
+    write({ projects: { '~/work/app': id, '~/work/app/': id } });
+    expect(() => loadConfig({ env: {}, home })).toThrow(new ConfigError(`projects has two entries for ${join(home, 'work/app')}`));
   });
 
   test('projects defaults to an empty object', () => {

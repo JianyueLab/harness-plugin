@@ -111,8 +111,7 @@ describe('hook', () => {
   test('start with stdin left open exits 0 within 2.5 s and prints the recall', async () => {
     const home = tempDir('hook-stdin');
     try {
-      const env = { ...process.env, HOME: home, XDG_CONFIG_HOME: join(home, '.config') };
-      delete env.JYL_MEMORY_DISTILL;
+      const env = { PATH: process.env.PATH, HOME: home, XDG_CONFIG_HOME: join(home, '.config') };
       const child = spawn(process.execPath, [HOOK, 'start'], { cwd: home, env, stdio: ['pipe', 'pipe', 'ignore'] });
       let out = '';
       child.stdout.setEncoding('utf8').on('data', (chunk) => (out += chunk));

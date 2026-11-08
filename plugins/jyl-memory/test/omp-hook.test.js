@@ -1,24 +1,25 @@
-import { describe, expect, mock, test } from 'bun:test';
+import { describe, expect, test } from 'bun:test';
+import jylMemory from '../hooks/post/jyl-memory.ts';
 
-const rendered = [];
-mock.module('../src/recall.mjs', () => ({ renderRecall: () => { rendered.push(1); return 'RECALL'; } }));
-const { default: jylMemory } = await import('../hooks/post/jyl-memory.ts');
+const inventoryDeps = { run: () => null, readFile: () => null, exists: () => false, listDirs: () => [] };
 
 function start() {
   const handlers = {};
-  jylMemory({ on: (name, fn) => (handlers[name] = fn) });
-  return handlers.before_agent_start;
+  const calls = [];
+  const render = (template, cwd, deps) => { calls.push(deps.inventoryDeps); return 'RECALL'; };
+  jylMemory({ on: (name, fn) => (handlers[name] = fn) }, { render, inventoryDeps });
+  return { handler: handlers.before_agent_start, calls };
 }
 
 describe('omp hook', () => {
-  test('recall is rendered only for a string or array system prompt', async () => {
-    const handler = start();
+  test('recall is rendered only for a string or array system prompt, once per hook', async () => {
+    const { handler, calls } = start();
     for (const systemPrompt of [undefined, null, 3, { text: 'x' }]) {
       expect(await handler({ systemPrompt }, {})).toBeUndefined();
     }
-    expect(rendered).toEqual([]);
+    expect(calls).toEqual([]);
     expect(await handler({ systemPrompt: 'base' }, {})).toEqual({ systemPrompt: 'base\n\nRECALL' });
     expect(await handler({ systemPrompt: ['a'] }, {})).toEqual({ systemPrompt: ['a', 'RECALL'] });
-    expect(rendered.length).toBe(1);
+    expect(calls).toEqual([inventoryDeps]);
   });
 });

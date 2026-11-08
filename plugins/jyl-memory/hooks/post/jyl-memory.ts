@@ -7,13 +7,6 @@ import { defaultInventoryDeps } from "../../src/repos.mjs";
 
 const RUN = fileURLToPath(new URL("../../scripts/run", import.meta.url));
 const TEMPLATE = readFileSync(new URL("../../prompts/recall.md", import.meta.url), "utf8");
-let recall: string | null = null;
-
-/** The recall prompt for this process's cwd, rendered once. */
-function recallText(): string {
-  recall ??= renderRecall(TEMPLATE, process.cwd(), { env: process.env, home: homedir(), inventoryDeps: defaultInventoryDeps });
-  return recall;
-}
 
 function distill(file: string, sessionId: string | null): void {
   const payload = JSON.stringify({ transcript_path: file, session_id: sessionId, cwd: process.cwd() });
@@ -26,8 +19,12 @@ function distill(file: string, sessionId: string | null): void {
   child.unref();
 }
 
-export default function jylMemory(pi: any): void {
+export default function jylMemory(pi: any, { render = renderRecall, inventoryDeps = defaultInventoryDeps } = {}): void {
   if (process.env.JYL_MEMORY_DISTILL) return;
+
+  let recall: string | null = null;
+  /** The recall prompt for this process's cwd, rendered once. */
+  const recallText = (): string => (recall ??= render(TEMPLATE, process.cwd(), { env: process.env, home: homedir(), inventoryDeps }));
 
   pi.on("before_agent_start", async (event: any, ctx: any) => {
     if (ctx?.agent?.kind === "sub") return;

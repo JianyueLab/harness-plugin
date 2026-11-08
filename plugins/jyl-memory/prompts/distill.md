@@ -11,7 +11,7 @@ Use only the `{{MCP_SERVER}}` MCP tools: jyl_project_list, jyl_project_find, jyl
    b. The repository's `project=` id in <repositories>.
    c. The repository's origin: call jyl_project_find with repository_url set to the origin, once per repository, and take the team project it returns.
    d. The personal project.
-   Unless 3a applies, use the personal project when the candidate matches no repository or is a private preference or personal information. For every option, use the personal project when the target team project is not in jyl_project_list, its id is invalid or not accessible, or its `role` is `reader`.
+   Unless 3a applies, use the personal project when the candidate matches no repository. Always use the personal project when the candidate is a private preference or personal information. For every option, use the personal project when the target team project is not in jyl_project_list, its id is invalid or not accessible, or its `role` is `reader`.
 4. A team project gets only decisions, facts and background about its repository, with visibility `project`. Never write to a project listed only under `links` of a jyl_project_find or jyl_project_get_context result. Never write the same content to two projects.
 5. Before writing, call jyl_memory_search with the candidate's key terms and only the target project's id.
    - Same subject already recorded in that project and this session changes or extends it: jyl_memory_get it, then jyl_memory_update with its expected_revision. Never update a memory whose project_id is not the target project's id.

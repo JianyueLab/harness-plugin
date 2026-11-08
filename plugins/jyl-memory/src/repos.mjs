@@ -82,17 +82,21 @@ function repoFileProject(path, readFile, warnings) {
   return null;
 }
 
+/** A remote URL without userinfo: `https://user:token@host/…` → `https://host/…`. scp-style remotes are unchanged. */
+const stripUserinfo = (url) => url.replace(/^([a-z][a-z0-9+.-]*:\/\/)[^/]*@/i, '$1');
+
 /**
  * The git repositories of a session: cwd's repository and its checked-out submodules,
  * or, when cwd is not inside a repository, its direct child repositories.
  * Deps: run(args, cwd) runs git and returns trimmed stdout or null; readFile(path) returns text or null;
- * exists(path); listDirs(path) returns child directory names.
+ * optional exists(path) and listDirs(path) (child directory names) default to defaultInventoryDeps.
  */
-export function repositoryInventory(cwd, { projects, run, readFile, exists, listDirs }) {
+export function repositoryInventory(cwd, { projects, run, readFile, exists = defaultInventoryDeps.exists, listDirs = defaultInventoryDeps.listDirs }) {
   const warnings = [];
   if (!cwd) return { repos: [], warnings };
   const repos = repoPaths(resolve(cwd), { run, exists, listDirs }).map((path) => {
-    const origin = git(run, path, 'config', '--get', 'remote.origin.url') || null;
+    const url = git(run, path, 'config', '--get', 'remote.origin.url');
+    const origin = url ? stripUserinfo(url) : null;
     const fromConfig = configProject(path, projects);
     if (fromConfig) return { path, origin, project_id: fromConfig, source: 'config' };
     const fromFile = repoFileProject(path, readFile, warnings);

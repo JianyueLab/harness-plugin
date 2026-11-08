@@ -56,6 +56,37 @@ describe('repositoryInventory', () => {
     expect(inventory('/w/app/src/lib', { repos: { '/w/app': { origin: 'o' } } }).repos.map((r) => r.path)).toEqual(['/w/app']);
   });
 
+  test('credentials in a URL origin are stripped from the inventory and its rendering', () => {
+    const cases = [
+      ['https://user:ghp_secret123@github.com/o/r.git', 'https://github.com/o/r.git'],
+      ['https://ghp_secret123@github.com/o/r.git', 'https://github.com/o/r.git'],
+      ['https://user:p@ss_ghp_secret123@github.com/o/r.git', 'https://github.com/o/r.git'],
+      ['ssh://git@git.example.com:2222/o/r.git', 'ssh://git.example.com:2222/o/r.git'],
+      ['git@github.com:o/r.git', 'git@github.com:o/r.git'],
+    ];
+    for (const [raw, clean] of cases) {
+      const { repos } = inventory('/w/app', { repos: { '/w/app': { origin: raw } } });
+      expect(repos[0].origin).toBe(clean);
+      const text = `${JSON.stringify(repos)}\n${renderInventory(repos)}`;
+      expect(text).not.toContain('ghp_secret123');
+      expect(text).toContain(`origin=${clean} `);
+    }
+  });
+
+  test('exists and listDirs are optional and default to the real filesystem', () => {
+    const { run, readFile } = fake({ repos: { '/w/app': { origin: 'o' } } });
+    expect(repositoryInventory('/w/app', { projects: {}, run, readFile }).repos.map((r) => r.path)).toEqual(['/w/app']);
+    const dir = tempDir('repos-optional');
+    try {
+      mkdirSync(join(dir, 'child', '.git'), { recursive: true });
+      mkdirSync(join(dir, 'plain'));
+      const none = fake({});
+      expect(repositoryInventory(dir, { projects: {}, run: none.run, readFile: none.readFile }).repos.map((r) => r.path)).toEqual([join(dir, 'child')]);
+    } finally {
+      cleanup(dir);
+    }
+  });
+
   test('a root with .gitmodules records each submodule with its own origin', () => {
     const tree = {
       repos: {

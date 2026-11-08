@@ -1,6 +1,8 @@
 tools:
   approval:
     mcp__memory_jyl_project_list: allow
+    mcp__memory_jyl_project_find: allow
+    mcp__memory_jyl_project_get_context: allow
     mcp__memory_jyl_memory_search: allow
     mcp__memory_jyl_memory_get: allow
     mcp__memory_jyl_memory_add: allow

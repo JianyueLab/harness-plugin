@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { ConfigError, loadConfig } from './config.mjs';
 import { buildPrompt, codexMcpServers, hostCommand } from './hosts.mjs';
 import { planDistill } from './plan.mjs';
+import { defaultInventoryDeps, renderInventory, repositoryInventory } from './repos.mjs';
 import * as claudeCode from './sources/claude-code.mjs';
 import * as codex from './sources/codex.mjs';
 import * as omp from './sources/omp.mjs';
@@ -41,7 +42,7 @@ function log(dir, now, line) {
 
 const fileKey = (key) => key.replace(/[^A-Za-z0-9._-]/g, '_');
 
-export async function distill(payload, { env, home, now, runHost: run, promptText }) {
+export async function distill(payload, { env, home, now, runHost: run, promptText, inventoryDeps = defaultInventoryDeps }) {
   const dir = stateDir(env, home);
   let config;
   try {
@@ -95,7 +96,9 @@ export async function distill(payload, { env, home, now, runHost: run, promptTex
   try {
     const otherMcpServers = payload.host === 'codex' ? codexMcpServers(env, home) : [];
     const { cmd, args } = hostCommand(payload.host, { model: config.models[payload.host], mcpServer: config.mcp_server, otherMcpServers });
-    const input = buildPrompt(promptText, { mcpServer: config.mcp_server, sessionText: plan.text, cwd: session.cwd });
+    const { repos, warnings } = repositoryInventory(session.cwd, { ...inventoryDeps, projects: config.projects });
+    for (const warning of warnings) log(dir, now, `${key} warning: ${warning}`);
+    const input = buildPrompt(promptText, { mcpServer: config.mcp_server, sessionText: plan.text, cwd: session.cwd, repositories: renderInventory(repos) });
     const { code, stdout, stderr = '' } = await run(cmd, args, input, { env: { ...env, JYL_MEMORY_DISTILL: '1' }, cwd: dir });
     if (code !== 0) {
       const reason = failureReason(code, stderr);
@@ -208,10 +211,10 @@ export function runHost(cmd, args, input, { env, cwd, timeoutMs = HOST_TIMEOUT_M
 }
 
 /** Worker entry: distills the payload in argv[0]; logs any error to plugin.log. */
-export async function main(argv, { env, home, now, runHost: run, loadPrompt }) {
+export async function main(argv, { env, home, now, runHost: run, loadPrompt, inventoryDeps }) {
   try {
     const payload = JSON.parse(argv[0] ?? '');
-    await distill(payload, { env, home, now, runHost: run, promptText: loadPrompt() });
+    await distill(payload, { env, home, now, runHost: run, promptText: loadPrompt(), inventoryDeps });
   } catch (error) {
     try {
       const text = `${error?.name ?? 'Error'}: ${error?.message ?? String(error)}`.replace(/\s+/g, ' ');

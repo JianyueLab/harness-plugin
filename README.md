@@ -381,7 +381,7 @@ that they are.
 
 Recalls JianyueLab memory at session start and distils each session into it when the session ends. Separate from `jyl-usage`: this plugin sends memory content, not counts.
 
-**What leaves the machine:** distilled memories only, written through the `memory` MCP server into your personal project. Session text goes only to the model of the host you are already using (`claude -p`, `codex exec`, `omp -p`), with tool output dropped and known secret shapes redacted.
+**What leaves the machine:** distilled memories only, written through the `memory` MCP server into your personal project or a team project matched to the repository. Repository origin URLs, without credentials, go to the `memory` server for project lookup. Session text goes only to the model of the host you are already using (`claude -p`, `codex exec`, `omp -p`), with tool output dropped and known secret shapes redacted.
 
 ### Install
 
@@ -401,9 +401,17 @@ This repo's `.agents/plugins/marketplace.json` takes precedence over `.claude-pl
 - Session end: the hook hands the transcript to a background worker and returns. The worker takes messages not distilled yet, skips sessions with fewer than 3 new user messages or under an excluded directory, and runs the host CLI with only the memory MCP tools:
   - Claude Code: built-in tools off.
   - Codex: shell, plugins, apps, hooks and every other configured MCP server off.
-  - omp: always-ask approval, with only the five memory tools allowed.
+  - omp: always-ask approval, with only the seven memory tools allowed.
+- Allowed tools: `jyl_project_list`, `jyl_project_find`, `jyl_project_get_context`, `jyl_memory_search`, `jyl_memory_get`, `jyl_memory_add`, `jyl_memory_update`.
 - In omp, `/new`, fork, resume and branch switches also distil the session left behind.
-- The host writes only to your personal project. It searches existing memories first and updates them instead of adding duplicates; at most 5 writes per session.
+- The worker lists the git repositories of the session directory: its repository and checked-out submodules, or its direct child repositories. Each has an origin and an optional project id.
+- Each memory goes to one project, first match wins:
+  1. a project the user named in the session;
+  2. the repository's project from `projects` in the config, then from `.jyl-memory.json` in the repository root;
+  3. the team project registered for the repository's origin (`jyl_project_find`);
+  4. your personal project.
+- Team projects get only decisions, facts and background about their repository, with visibility `project`. Private preferences, personal information and content matching no repository go to your personal project. A team project where you are `reader` falls back to your personal project.
+- The host searches existing memories first and updates them instead of adding duplicates; at most 5 writes per project.
 - Progress is recorded only when the host exits 0 and its last line is `done`.
 - A failed run is retried at the next session end. The log line carries the last line of the host's stderr, with known secret shapes redacted.
 - A refusal (omp prints a stderr line starting with `Refusal`) is not retried: those messages are recorded as refused, and later runs send only newer messages.
@@ -422,6 +430,9 @@ This repo's `.agents/plugins/marketplace.json` takes precedence over `.claude-pl
 | `max_chars` | `200000` | text cap per run (newest messages kept) |
 | `mcp_server` | `memory` | name of the memory MCP server in each host |
 | `models` | `{"claude-code":"haiku","codex":null,"omp":"@smol"}` | model per host; `null` uses the host default |
+| `projects` | `{}` | directory → project UUID; the longest matching directory applies to repositories under it |
+
+`.jyl-memory.json` in a repository root: `{"project_id": "<UUID>"}`. An invalid file is ignored and logged as `<session> warning: …`.
 
 State and log: `~/.local/state/jyl-memory/` (`plugin-state.json`, `plugin.log`).
 

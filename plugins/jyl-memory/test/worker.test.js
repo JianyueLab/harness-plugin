@@ -13,6 +13,8 @@ describe('distill', () => {
   let exitCode;
   let stdout;
   let stderr;
+  let gitRepos;
+  let repoFiles;
   const deps = () => ({
     env: {},
     home,
@@ -21,6 +23,18 @@ describe('distill', () => {
     runHost: async (cmd, args, input, options) => {
       calls.push({ cmd, args, input, options });
       return { code: exitCode, stdout, stderr };
+    },
+    inventoryDeps: {
+      run: (args) => {
+        const [, path, command] = args;
+        if (!(path in gitRepos)) return null;
+        if (command === 'rev-parse') return path;
+        if (command === 'config' && args.includes('remote.origin.url')) return gitRepos[path];
+        return null;
+      },
+      readFile: (path) => repoFiles[path] ?? null,
+      exists: () => false,
+      listDirs: () => [],
     },
   });
   const statePath = () => join(stateDir({}, home), 'plugin-state.json');
@@ -36,6 +50,8 @@ describe('distill', () => {
     exitCode = 0;
     stdout = 'Recorded one memory.\n\ndone\n';
     stderr = '';
+    gitRepos = {};
+    repoFiles = {};
   });
   afterEach(() => cleanup(home));
 
@@ -45,13 +61,30 @@ describe('distill', () => {
     expect(await distill({ host: 'claude-code', transcript_path: path, session_id: 'c-1', cwd: '/work/alpha' }, deps())).toBe('distilled');
     expect(calls).toHaveLength(1);
     expect(calls[0].cmd).toBe('claude');
-    expect(calls[0].input.startsWith('Use memory.\n\n<session cwd="/work/alpha">')).toBe(true);
+    expect(calls[0].input.startsWith('Use memory.\n\n<repositories>\n(no git repositories)\n</repositories>\n\n<session cwd="/work/alpha">')).toBe(true);
     expect(calls[0].input).toContain('How do we deploy?');
     expect(calls[0].options.env.JYL_MEMORY_DISTILL).toBe('1');
     expect(calls[0].options.cwd).toBe(stateDir({}, home));
     const state = JSON.parse(readFileSync(statePath(), 'utf8'));
     expect(state.sessions['claude-code:c-1'].sent_message_ids).toEqual(['u1', 'a3', 'u9', 'u10']);
     expect(existsSync(join(stateDir({}, home), 'pending', 'claude-code_c-1.txt'))).toBe(false);
+  });
+
+  const alphaSession = (id) => [...claudeSession(id), { type: 'user', sessionId: id, cwd: '/work/alpha', uuid: 'u9', message: { role: 'user', content: 'more' } }, { type: 'user', sessionId: id, cwd: '/work/alpha', uuid: 'u10', message: { role: 'user', content: 'again' } }];
+
+  test('the prompt carries the repository inventory of the session directory', async () => {
+    gitRepos = { '/work/alpha': 'git@github.com:o/alpha.git' };
+    const path = transcript('c-inv.jsonl', alphaSession('c-inv'));
+    expect(await distill({ host: 'claude-code', transcript_path: path, session_id: 'c-inv', cwd: '/work/alpha' }, deps())).toBe('distilled');
+    expect(calls[0].input).toContain('<repositories>\n- /work/alpha origin=git@github.com:o/alpha.git project=none\n</repositories>\n\n<session');
+  });
+
+  test('a broken .jyl-memory.json is logged as a warning with the session key', async () => {
+    gitRepos = { '/work/alpha': 'git@github.com:o/alpha.git' };
+    repoFiles = { '/work/alpha/.jyl-memory.json': '{broken' };
+    const path = transcript('c-bad.jsonl', alphaSession('c-bad'));
+    expect(await distill({ host: 'claude-code', transcript_path: path, session_id: 'c-bad', cwd: '/work/alpha' }, deps())).toBe('distilled');
+    expect(readFileSync(join(stateDir({}, home), 'plugin.log'), 'utf8')).toContain('claude-code:c-bad warning: ignored /work/alpha/.jyl-memory.json: expected {"project_id": "<UUID>"}');
   });
 
   test('a second run with no new messages is too short and does not call the host', async () => {

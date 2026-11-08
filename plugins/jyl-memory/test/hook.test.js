@@ -2,21 +2,52 @@ import { describe, expect, test } from 'bun:test';
 import { hook } from '../src/hook.mjs';
 import { sink } from './helpers.js';
 
+const fakeRepo = {
+  run(args) {
+    const rest = args.slice(2).join(' ');
+    if (rest === 'rev-parse --show-toplevel') return args[1] === '/w' ? '/w' : null;
+    if (rest === 'config --get remote.origin.url') return 'https://github.com/o/w';
+    return null;
+  },
+  readFile: () => null,
+  exists: () => false,
+  listDirs: () => [],
+};
+
 function deps(overrides = {}) {
   const spawned = [];
   const stdout = sink();
   return {
     spawned,
     stdout,
-    deps: { env: {}, readStdin: async () => '', stdout, spawnWorker: (p) => spawned.push(p), recallText: 'RECALL', ...overrides },
+    deps: {
+      env: {},
+      readStdin: async () => '',
+      stdout,
+      spawnWorker: (p) => spawned.push(p),
+      recallTemplate: 'RECALL\n{{REPOSITORIES}}',
+      recallDeps: { env: {}, home: '/nonexistent-home', inventoryDeps: fakeRepo },
+      ...overrides,
+    },
   };
 }
 
 describe('hook', () => {
-  test('start prints the recall prompt', async () => {
-    const { deps: d, stdout } = deps();
+  test('start prints the recall prompt with the session cwd repositories', async () => {
+    const { deps: d, stdout } = deps({ readStdin: async () => '{"cwd":"/w"}' });
     expect(await hook(['start'], d)).toBe(0);
-    expect(stdout.text()).toBe('RECALL');
+    expect(stdout.text()).toBe('RECALL\n- /w origin=https://github.com/o/w project=none');
+  });
+
+  test('start without a usable stdin cwd prints the recall without repositories', async () => {
+    for (const input of ['', 'nope', '{}', '{"cwd":3}']) {
+      const { deps: d, stdout } = deps({ readStdin: async () => input });
+      expect(await hook(['start'], d)).toBe(0);
+      expect(stdout.text()).toBe('RECALL\n(no git repositories)');
+    }
+    const { deps: d, stdout } = deps({ readStdin: async () => { throw new Error('closed'); } });
+    expect(await hook(['start'], d)).toBe(0);
+    expect(stdout.text()).toBe('RECALL\n(no git repositories)');
   });
 
   test('inside a distill run every event is a no-op', async () => {

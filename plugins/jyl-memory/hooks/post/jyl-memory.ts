@@ -1,9 +1,19 @@
 import { spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
+import { renderRecall } from "../../src/recall.mjs";
+import { defaultInventoryDeps } from "../../src/repos.mjs";
 
 const RUN = fileURLToPath(new URL("../../scripts/run", import.meta.url));
-const RECALL = readFileSync(new URL("../../prompts/recall.md", import.meta.url), "utf8");
+const TEMPLATE = readFileSync(new URL("../../prompts/recall.md", import.meta.url), "utf8");
+let recall: string | null = null;
+
+/** The recall prompt for this process's cwd, rendered once. */
+function recallText(): string {
+  recall ??= renderRecall(TEMPLATE, process.cwd(), { env: process.env, home: homedir(), inventoryDeps: defaultInventoryDeps });
+  return recall;
+}
 
 function distill(file: string, sessionId: string | null): void {
   const payload = JSON.stringify({ transcript_path: file, session_id: sessionId, cwd: process.cwd() });
@@ -22,6 +32,7 @@ export default function jylMemory(pi: any): void {
   pi.on("before_agent_start", async (event: any, ctx: any) => {
     if (ctx?.agent?.kind === "sub") return;
     const base = event?.systemPrompt;
+    const RECALL = recallText();
     if (Array.isArray(base)) {
       if (base.some((b: unknown) => typeof b === "string" && b.includes(RECALL))) return;
       return { systemPrompt: [...base, RECALL] };

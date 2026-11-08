@@ -1,15 +1,26 @@
 import { spawn } from 'node:child_process';
 import { readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
+import { renderRecall } from './recall.mjs';
+import { defaultInventoryDeps } from './repos.mjs';
 
 const WORKER = fileURLToPath(new URL('./worker.mjs', import.meta.url));
 const HOSTS = ['claude-code', 'codex', 'omp'];
+const START_STDIN_MS = 1000;
 
-export async function hook(argv, { env, readStdin, stdout, spawnWorker, recallText }) {
+export async function hook(argv, { env, readStdin, stdout, spawnWorker, recallTemplate, recallDeps }) {
   if (env.JYL_MEMORY_DISTILL) return 0;
   const [event, ...rest] = argv;
   if (event === 'start') {
-    stdout.write(recallText);
+    let cwd = null;
+    try {
+      const payload = JSON.parse(await readStdin(START_STDIN_MS));
+      if (payload && typeof payload.cwd === 'string' && payload.cwd !== '') cwd = payload.cwd;
+    } catch {
+      // No usable payload: render without repositories.
+    }
+    stdout.write(renderRecall(recallTemplate, cwd, recallDeps));
     return 0;
   }
   if (event !== 'end') return 0;
@@ -40,16 +51,31 @@ function spawnWorker(payload) {
     .unref();
 }
 
-async function readStdin() {
-  let text = '';
-  for await (const chunk of process.stdin) text += chunk;
-  return text;
+/** All of stdin; with `limitMs`, whatever arrived by then. */
+function readStdin(limitMs) {
+  return new Promise((resolve) => {
+    let text = '';
+    let timer = null;
+    const done = () => {
+      clearTimeout(timer);
+      process.stdin.removeAllListeners('data');
+      process.stdin.pause();
+      process.stdin.destroy();
+      resolve(text);
+    };
+    if (limitMs) timer = setTimeout(done, limitMs);
+    process.stdin.setEncoding('utf8');
+    process.stdin.on('data', (chunk) => (text += chunk));
+    process.stdin.once('end', done);
+    process.stdin.once('error', done);
+  });
 }
 
 if (import.meta.main ?? process.argv[1]?.endsWith('/src/hook.mjs')) {
   try {
-    const recallText = readFileSync(new URL('../prompts/recall.md', import.meta.url), 'utf8');
-    await hook(process.argv.slice(2), { env: process.env, readStdin, stdout: process.stdout, spawnWorker, recallText });
+    const recallTemplate = readFileSync(new URL('../prompts/recall.md', import.meta.url), 'utf8');
+    const recallDeps = { env: process.env, home: homedir(), inventoryDeps: defaultInventoryDeps };
+    await hook(process.argv.slice(2), { env: process.env, readStdin, stdout: process.stdout, spawnWorker, recallTemplate, recallDeps });
   } catch {
     // Hooks never fail the host.
   }

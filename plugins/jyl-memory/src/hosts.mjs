@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-export const MEMORY_TOOLS = ['jyl_project_list', 'jyl_memory_search', 'jyl_memory_get', 'jyl_memory_add', 'jyl_memory_update'];
+export const MEMORY_TOOLS = ['jyl_project_list', 'jyl_project_find', 'jyl_project_get_context', 'jyl_memory_search', 'jyl_memory_get', 'jyl_memory_add', 'jyl_memory_update'];
 
 export const OMP_CONFIG = fileURLToPath(new URL('../config/omp-distill.yml', import.meta.url));
 
@@ -65,7 +65,8 @@ export function hostCommand(host, { model, mcpServer, otherMcpServers = [] }) {
   }
 }
 
-export function buildPrompt(promptText, { mcpServer, sessionText, cwd }) {
+export function buildPrompt(promptText, { mcpServer, sessionText, cwd, repositories }) {
+  const inventory = repositories.replaceAll('</repositories', '<\\/repositories');
   const body = sessionText.replaceAll('</session', '<\\/session');
-  return `${promptText.replaceAll('{{MCP_SERVER}}', mcpServer)}\n\n<session cwd="${cwd ?? ''}">\n${body}\n</session>\n`;
+  return `${promptText.replaceAll('{{MCP_SERVER}}', mcpServer)}\n\n<repositories>\n${inventory}\n</repositories>\n\n<session cwd="${cwd ?? ''}">\n${body}\n</session>\n`;
 }

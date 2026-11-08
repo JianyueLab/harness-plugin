@@ -8,6 +8,7 @@ import { planDistill } from './plan.mjs';
 import * as claudeCode from './sources/claude-code.mjs';
 import * as codex from './sources/codex.mjs';
 import * as omp from './sources/omp.mjs';
+import { scrub } from './scrub.mjs';
 import { loadState, saveState, withLock } from './state.mjs';
 
 export const PENDING_FRESH_MS = 15 * 60_000;
@@ -15,6 +16,8 @@ export const HOST_TIMEOUT_MS = 10 * 60_000;
 export const LOG_MAX_BYTES = 256 * 1024;
 export const KILL_GRACE_MS = 10_000;
 export const STDOUT_KEEP_BYTES = 64 * 1024;
+export const STDERR_KEEP_BYTES = 8 * 1024;
+const REASON_MAX_CHARS = 300;
 
 const READERS = { 'claude-code': claudeCode, codex, omp };
 
@@ -55,7 +58,12 @@ export async function distill(payload, { env, home, now, runHost: run, promptTex
   let text;
   try {
     text = readFileSync(payload.transcript_path, 'utf8');
-  } catch {
+  } catch (error) {
+    // A session closed before its first message has no transcript file.
+    if (error.code === 'ENOENT') {
+      log(dir, now, `${payload.host}:${payload.session_id ?? '?'} skip no_transcript`);
+      return 'no_transcript';
+    }
     log(dir, now, `${payload.host}:${payload.session_id ?? '?'} unreadable transcript`);
     return 'unreadable';
   }
@@ -88,9 +96,26 @@ export async function distill(payload, { env, home, now, runHost: run, promptTex
     const otherMcpServers = payload.host === 'codex' ? codexMcpServers(env, home) : [];
     const { cmd, args } = hostCommand(payload.host, { model: config.models[payload.host], mcpServer: config.mcp_server, otherMcpServers });
     const input = buildPrompt(promptText, { mcpServer: config.mcp_server, sessionText: plan.text, cwd: session.cwd });
-    const { code, stdout } = await run(cmd, args, input, { env: { ...env, JYL_MEMORY_DISTILL: '1' }, cwd: dir });
+    const { code, stdout, stderr = '' } = await run(cmd, args, input, { env: { ...env, JYL_MEMORY_DISTILL: '1' }, cwd: dir });
     if (code !== 0) {
-      log(dir, now, `${key} failed exit=${code}`);
+      const reason = failureReason(code, stderr);
+      if (isRefusal(stderr)) {
+        // The same text is refused again on every retry; later runs send only newer messages.
+        await withLock(dir, async () => {
+          const state = loadState(statePath);
+          const previous = state.sessions[key];
+          state.sessions[key] = {
+            decision: previous?.decision ?? 'refused',
+            sent_message_ids: previous?.sent_message_ids ?? [],
+            refused_message_ids: [...(previous?.refused_message_ids ?? []), ...plan.messageIds],
+            updated_at: new Date(now()).toISOString(),
+          };
+          saveState(statePath, state);
+        });
+        log(dir, now, `${key} refused ${plan.messageIds.length} messages: ${reason}`);
+        return 'refused';
+      }
+      log(dir, now, `${key} failed exit=${code}${reason ? `: ${reason}` : ''}`);
       return 'failed';
     }
     if (!reportedDone(stdout)) {
@@ -103,6 +128,7 @@ export async function distill(payload, { env, home, now, runHost: run, promptTex
       state.sessions[key] = {
         decision: 'sent',
         sent_message_ids: [...(previous?.sent_message_ids ?? []), ...plan.messageIds],
+        ...(previous?.refused_message_ids ? { refused_message_ids: previous.refused_message_ids } : {}),
         updated_at: new Date(now()).toISOString(),
       };
       saveState(statePath, state);
@@ -119,21 +145,44 @@ function reportedDone(stdout) {
   return lines.at(-1)?.toLowerCase() === 'done';
 }
 
-/** Runs the host CLI; resolves { code, stdout } with the last STDOUT_KEEP_BYTES of stdout. */
+/** omp prints a model refusal as a stderr line starting with "Refusal". */
+function isRefusal(stderr) {
+  return /^Refusal\b/m.test(stderr);
+}
+
+/** The last non-empty stderr line, scrubbed and shortened; "timed out" for the timeout code. */
+function failureReason(code, stderr) {
+  if (code === 124) return 'timed out';
+  const last = stderr.split('\n').map((line) => line.trim()).filter(Boolean).at(-1);
+  if (!last) return '';
+  const text = scrub(last);
+  return text.length > REASON_MAX_CHARS ? `${text.slice(0, REASON_MAX_CHARS)}…` : text;
+}
+
+/** Runs the host CLI; resolves { code, stdout, stderr } with the last STDOUT_KEEP_BYTES / STDERR_KEEP_BYTES of each. */
 export function runHost(cmd, args, input, { env, cwd, timeoutMs = HOST_TIMEOUT_MS, killGraceMs = KILL_GRACE_MS }) {
   return new Promise((resolve) => {
     let child;
     try {
-      child = spawn(cmd, args, { env, cwd, stdio: ['pipe', 'pipe', 'ignore'] });
+      child = spawn(cmd, args, { env, cwd, stdio: ['pipe', 'pipe', 'pipe'] });
     } catch {
-      resolve({ code: 127, stdout: '' });
+      resolve({ code: 127, stdout: '', stderr: '' });
       return;
     }
-    let kept = Buffer.alloc(0);
-    child.stdout.on('data', (chunk) => {
-      kept = Buffer.concat([kept, chunk]);
-      if (kept.length > STDOUT_KEEP_BYTES) kept = kept.subarray(kept.length - STDOUT_KEEP_BYTES);
-    });
+    const tail = (limit) => {
+      let kept = Buffer.alloc(0);
+      return {
+        push(chunk) {
+          kept = Buffer.concat([kept, chunk]);
+          if (kept.length > limit) kept = kept.subarray(kept.length - limit);
+        },
+        text: () => kept.toString('utf8'),
+      };
+    };
+    const out = tail(STDOUT_KEEP_BYTES);
+    const err = tail(STDERR_KEEP_BYTES);
+    child.stdout.on('data', out.push);
+    child.stderr.on('data', err.push);
     let timedOut = false;
     let grace;
     const timer = setTimeout(() => {
@@ -147,11 +196,11 @@ export function runHost(cmd, args, input, { env, cwd, timeoutMs = HOST_TIMEOUT_M
     };
     child.on('error', () => {
       clear();
-      resolve({ code: 127, stdout: '' });
+      resolve({ code: 127, stdout: '', stderr: '' });
     });
     child.on('close', (code) => {
       clear();
-      resolve({ code: timedOut ? 124 : (code ?? 1), stdout: kept.toString('utf8') });
+      resolve({ code: timedOut ? 124 : (code ?? 1), stdout: out.text(), stderr: err.text() });
     });
     child.stdin.on('error', () => {});
     child.stdin.end(input);

@@ -52,6 +52,14 @@ describe('repositoryInventory', () => {
     });
   });
 
+  test('stops adding repositories after the 5 s deadline and warns once', () => {
+    let t = -2000;
+    const tree = { repos: { '/w': { origin: 'o', submodules: ['a', 'b'] }, '/w/a': { origin: 'oa' }, '/w/b': { origin: 'ob' } } };
+    const result = repositoryInventory('/w', { projects: {}, ...fake(tree), now: () => (t += 2000) });
+    expect(result.repos.map((r) => r.path)).toEqual(['/w', '/w/a']);
+    expect(result.warnings).toEqual(['repository inventory stopped after 5 s']);
+  });
+
   test('a subdirectory of a repository records the top level', () => {
     expect(inventory('/w/app/src/lib', { repos: { '/w/app': { origin: 'o' } } }).repos.map((r) => r.path)).toEqual(['/w/app']);
   });

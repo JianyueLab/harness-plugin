@@ -4,6 +4,7 @@ import { join, resolve, sep } from 'node:path';
 import { UUID } from './config.mjs';
 
 export const MAX_REPOS = 50;
+export const INVENTORY_DEADLINE_MS = 5000;
 export const REPO_FILE = '.jyl-memory.json';
 
 /** Production deps for repositoryInventory: real git (2 s per call) and the real filesystem. */
@@ -89,19 +90,29 @@ const stripUserinfo = (url) => url.replace(/^([a-z][a-z0-9+.-]*:\/\/)[^/]*@/i, '
  * The git repositories of a session: cwd's repository and its checked-out submodules,
  * or, when cwd is not inside a repository, its direct child repositories.
  * Deps: run(args, cwd) runs git and returns trimmed stdout or null; readFile(path) returns text or null;
- * optional exists(path) and listDirs(path) (child directory names) default to defaultInventoryDeps.
+ * optional exists(path) and listDirs(path) (child directory names) default to defaultInventoryDeps; optional now() defaults to Date.now.
+ * Stops adding repositories once INVENTORY_DEADLINE_MS has passed and adds a warning.
  */
-export function repositoryInventory(cwd, { projects, run, readFile, exists = defaultInventoryDeps.exists, listDirs = defaultInventoryDeps.listDirs }) {
+export function repositoryInventory(cwd, { projects, run, readFile, exists = defaultInventoryDeps.exists, listDirs = defaultInventoryDeps.listDirs, now = Date.now }) {
   const warnings = [];
   if (!cwd) return { repos: [], warnings };
-  const repos = repoPaths(resolve(cwd), { run, exists, listDirs }).map((path) => {
+  const start = now();
+  const repos = [];
+  for (const path of repoPaths(resolve(cwd), { run, exists, listDirs })) {
+    if (now() - start > INVENTORY_DEADLINE_MS) {
+      warnings.push('repository inventory stopped after 5 s');
+      break;
+    }
     const url = git(run, path, 'config', '--get', 'remote.origin.url');
     const origin = url ? stripUserinfo(url) : null;
     const fromConfig = configProject(path, projects);
-    if (fromConfig) return { path, origin, project_id: fromConfig, source: 'config' };
+    if (fromConfig) {
+      repos.push({ path, origin, project_id: fromConfig, source: 'config' });
+      continue;
+    }
     const fromFile = repoFileProject(path, readFile, warnings);
-    return { path, origin, project_id: fromFile, source: fromFile ? 'repo_file' : null };
-  });
+    repos.push({ path, origin, project_id: fromFile, source: fromFile ? 'repo_file' : null });
+  }
   return { repos, warnings };
 }
 

@@ -159,6 +159,8 @@ describe('buildPrompt', () => {
     expect(text).toContain('<repositories>');
     expect(text).toContain('visibility `project`');
     expect(text).toContain('`reader`');
+    expect(text).toContain('Unless 3a applies, use the personal project when the candidate matches no repository');
+    expect(text).toContain('Call jyl_project_list with limit 100, and call it again with each next_cursor');
   });
 
   test('the shipped distill prompt ends with the done or failed reply rule', () => {

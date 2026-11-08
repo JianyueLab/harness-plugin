@@ -19,8 +19,12 @@ function distill(file: string, sessionId: string | null): void {
   child.unref();
 }
 
-export default function jylMemory(pi: any, { render = renderRecall, inventoryDeps = defaultInventoryDeps } = {}): void {
+export default function jylMemory(pi: any, options?: unknown): void {
   if (process.env.JYL_MEMORY_DISTILL) return;
+  const { render = renderRecall, inventoryDeps = defaultInventoryDeps } = (options && typeof options === "object" ? options : {}) as {
+    render?: typeof renderRecall;
+    inventoryDeps?: typeof defaultInventoryDeps;
+  };
 
   let recall: string | null = null;
   /** The recall prompt for this process's cwd, rendered once. */

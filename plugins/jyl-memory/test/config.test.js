@@ -37,4 +37,25 @@ describe('loadConfig', () => {
       expect(() => loadConfig({ env: {}, home })).toThrow(ConfigError);
     }
   });
+
+  test('projects maps directories to project UUIDs; ~ expands and keys resolve', () => {
+    const id = '11111111-1111-4111-8111-111111111111';
+    write({ projects: { '~/work/app': id, '/srv/../srv/api/': 'ABCDEF01-2345-4678-9ABC-DEF012345678' } });
+    expect(loadConfig({ env: {}, home }).projects).toEqual({
+      [join(home, 'work/app')]: id,
+      '/srv/api': 'ABCDEF01-2345-4678-9ABC-DEF012345678',
+    });
+  });
+
+  test('projects defaults to an empty object', () => {
+    write({ enabled: true });
+    expect(loadConfig({ env: {}, home }).projects).toEqual({});
+  });
+
+  test('projects that are not a directory → UUID map are errors', () => {
+    for (const projects of [[], 'x', null, { '/a': 'not-a-uuid' }, { '/a': 1 }, { '': '11111111-1111-4111-8111-111111111111' }]) {
+      write({ projects });
+      expect(() => loadConfig({ env: {}, home })).toThrow(new ConfigError('projects must map directories to project UUIDs'));
+    }
+  });
 });

@@ -8,7 +8,10 @@ export const DEFAULT_CONFIG = Object.freeze({
   max_chars: 200_000,
   mcp_server: 'memory',
   models: Object.freeze({ 'claude-code': 'haiku', codex: null, omp: '@smol' }),
+  projects: Object.freeze({}),
 });
+
+export const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 const HOSTS = ['claude-code', 'codex', 'omp'];
 
@@ -28,7 +31,7 @@ const isInt = (value, min) => Number.isInteger(value) && value >= min;
 
 export function loadConfig({ env, home }) {
   const path = configPath(env, home);
-  const config = { ...DEFAULT_CONFIG, exclude_paths: [], models: { ...DEFAULT_CONFIG.models } };
+  const config = { ...DEFAULT_CONFIG, exclude_paths: [], models: { ...DEFAULT_CONFIG.models }, projects: {} };
   let text;
   try {
     text = readFileSync(path, 'utf8');
@@ -71,6 +74,13 @@ export function loadConfig({ env, home }) {
           if (!HOSTS.includes(host)) throw new ConfigError(`models has an unknown host: ${host}`);
           if (model !== null && (typeof model !== 'string' || model === '')) throw new ConfigError(`models.${host} must be a model name or null`);
           config.models[host] = model;
+        }
+        break;
+      case 'projects':
+        if (!value || typeof value !== 'object' || Array.isArray(value)) throw new ConfigError('projects must map directories to project UUIDs');
+        for (const [dir, id] of Object.entries(value)) {
+          if (dir === '' || typeof id !== 'string' || !UUID.test(id)) throw new ConfigError('projects must map directories to project UUIDs');
+          config.projects[resolve(expandHome(dir, home))] = id;
         }
         break;
       default:

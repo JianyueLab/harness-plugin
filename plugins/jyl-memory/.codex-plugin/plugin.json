@@ -1,6 +1,6 @@
 {
   "name": "jyl-memory",
-  "version": "27.1.0",
+  "version": "27.1.1",
   "description": "Recalls JianyueLab memory at session start and distils each session into it when the session ends.",
   "hooks": "./hooks/hooks.json"
 }

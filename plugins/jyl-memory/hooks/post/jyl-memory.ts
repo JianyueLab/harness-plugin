@@ -32,6 +32,7 @@ export default function jylMemory(pi: any): void {
   pi.on("before_agent_start", async (event: any, ctx: any) => {
     if (ctx?.agent?.kind === "sub") return;
     const base = event?.systemPrompt;
+    if (!Array.isArray(base) && typeof base !== "string") return;
     const RECALL = recallText();
     if (Array.isArray(base)) {
       if (base.some((b: unknown) => typeof b === "string" && b.includes(RECALL))) return;

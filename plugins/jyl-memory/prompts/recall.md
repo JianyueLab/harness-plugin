@@ -1,6 +1,6 @@
 Long-term memory for this user is in the `memory` MCP server (tools named `jyl_*`).
 
-Git repositories in this session:
+Git repositories in this session, one per line: `- <path> origin=<url or none> project=<project id or none>[ (from config|repo_file)]`; the bracketed suffix is present only when the project id came from the user's config or the repository's `.jyl-memory.json`.
 {{REPOSITORIES}}
 
 Before you start a task:

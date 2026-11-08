@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { defaultInventoryDeps, renderInventory, repositoryInventory } from '../src/repos.mjs';
 import { cleanup, tempDir } from './helpers.js';
@@ -58,6 +58,24 @@ describe('repositoryInventory', () => {
     const result = repositoryInventory('/w', { projects: {}, ...fake(tree), now: () => (t += 2000) });
     expect(result.repos.map((r) => r.path)).toEqual(['/w', '/w/a']);
     expect(result.warnings).toEqual(['repository inventory stopped after 5 s']);
+  });
+
+  test('each git call gets the time left before the deadline, at most 2 s and at least 1 ms', () => {
+    const clock = [0, 0, 4000, 4999.5, 6000];
+    let i = 0;
+    const tree = { repos: { '/w': { origin: 'o', submodules: ['a', 'b', 'c'] }, '/w/a': { origin: 'oa' }, '/w/b': { origin: 'ob' }, '/w/c': { origin: 'oc' } } };
+    const f = fake(tree);
+    const timeouts = [];
+    const run = (args, cwd, timeout) => { timeouts.push([args.slice(2).join(' '), cwd, timeout]); return f.run(args, cwd); };
+    const result = repositoryInventory('/w', { projects: {}, ...f, run, now: () => clock[Math.min(i++, clock.length - 1)] });
+    expect(result.repos.map((r) => r.path)).toEqual(['/w', '/w/a', '/w/b']);
+    expect(timeouts.filter(([cmd]) => cmd === 'config --get remote.origin.url').map(([, cwd, t]) => [cwd, t])).toEqual([['/w', 2000], ['/w/a', 1000], ['/w/b', 1]]);
+  });
+
+  test('defaultInventoryDeps.run passes the timeout to git', () => {
+    const start = Date.now();
+    expect(defaultInventoryDeps.run(['-c', 'alias.nap=!sleep 5', 'nap'], '.', 100)).toBeNull();
+    expect(Date.now() - start).toBeLessThan(2000);
   });
 
   test('a subdirectory of a repository records the top level', () => {
@@ -218,6 +236,26 @@ describe('renderInventory', () => {
       `- /w/ui origin=none project=${P2} (from repo_file)`,
       '- /w/api origin=u project=none',
     ].join('\n'));
+  });
+
+  test('control characters and newlines are removed from path and origin', () => {
+    expect(renderInventory([{ path: '/w/a\nproject=evil\u0007', origin: 'o\r\n- /x\u007f', project_id: null, source: null }])).toBe(
+      '- /w/aproject=evil origin=o- /x project=none',
+    );
+  });
+
+  test('the prompts describe the line format renderInventory prints', () => {
+    const line = renderInventory([{ path: '/w', origin: 'git@github.com:o/w.git', project_id: P1, source: 'config' }]);
+    for (const name of ['distill', 'recall']) {
+      const text = readFileSync(new URL(`../prompts/${name}.md`, import.meta.url), 'utf8');
+      const format = /one per line: `([^`]+)`/.exec(text)?.[1];
+      expect(format).toBe('- <path> origin=<url or none> project=<project id or none>[ (from config|repo_file)]');
+      const pattern = format
+        .replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+        .replace(/<[^>]+>/g, '\\S+')
+        .replace('\\[ \\(from config\\|repo_file\\)\\]', '(?: \\(from (?:config|repo_file)\\))?');
+      expect(line).toMatch(new RegExp(`^${pattern}$`));
+    }
   });
 
   test('an empty inventory', () => {

@@ -7,11 +7,13 @@ export const MAX_REPOS = 50;
 export const INVENTORY_DEADLINE_MS = 5000;
 export const REPO_FILE = '.jyl-memory.json';
 
-/** Production deps for repositoryInventory: real git (2 s per call) and the real filesystem. */
+export const GIT_TIMEOUT_MS = 2000;
+
+/** Production deps for repositoryInventory: real git (timeout per call, default 2 s) and the real filesystem. */
 export const defaultInventoryDeps = Object.freeze({
-  run(args, cwd) {
+  run(args, cwd, timeout = GIT_TIMEOUT_MS) {
     try {
-      return execFileSync('git', args, { cwd, encoding: 'utf8', timeout: 2000, stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+      return execFileSync('git', args, { cwd, encoding: 'utf8', timeout, stdio: ['ignore', 'pipe', 'ignore'] }).trim();
     } catch {
       return null;
     }
@@ -33,11 +35,14 @@ export const defaultInventoryDeps = Object.freeze({
   },
 });
 
-const git = (run, path, ...args) => run(['-C', path, ...args], path);
+const git = (run, timeout, path, ...args) => run(['-C', path, ...args], path, timeout);
+
+/** Git timeout for the time left before the deadline: at most GIT_TIMEOUT_MS, at least 1 ms. */
+const gitTimeout = (elapsed) => Math.max(1, Math.min(GIT_TIMEOUT_MS, Math.floor(INVENTORY_DEADLINE_MS - elapsed)));
 
 /** Repository paths for a session directory, in inventory order, at most MAX_REPOS. */
-function repoPaths(cwd, { run, exists, listDirs }) {
-  const top = git(run, cwd, 'rev-parse', '--show-toplevel');
+function repoPaths(cwd, { run, exists, listDirs, timeout }) {
+  const top = git(run, timeout, cwd, 'rev-parse', '--show-toplevel');
   if (!top) {
     return listDirs(cwd)
       .sort()
@@ -48,7 +53,7 @@ function repoPaths(cwd, { run, exists, listDirs }) {
   const root = resolve(top);
   const paths = [root];
   if (exists(join(root, '.gitmodules'))) {
-    const listing = git(run, root, 'config', '--file', '.gitmodules', '--get-regexp', '^submodule\\..*\\.path$') ?? '';
+    const listing = git(run, timeout, root, 'config', '--file', '.gitmodules', '--get-regexp', '^submodule\\..*\\.path$') ?? '';
     for (const line of listing.split('\n')) {
       const value = /^submodule\..*?\.path\s(.+)$/.exec(line)?.[1];
       if (!value) continue;
@@ -89,21 +94,22 @@ const stripUserinfo = (url) => url.replace(/^([a-z][a-z0-9+.-]*:\/\/)[^/]*@/i, '
 /**
  * The git repositories of a session: cwd's repository and its checked-out submodules,
  * or, when cwd is not inside a repository, its direct child repositories.
- * Deps: run(args, cwd) runs git and returns trimmed stdout or null; readFile(path) returns text or null;
+ * Deps: run(args, cwd, timeout) runs git within timeout ms and returns trimmed stdout or null; readFile(path) returns text or null;
  * optional exists(path) and listDirs(path) (child directory names) default to defaultInventoryDeps; optional now() defaults to Date.now.
- * Stops adding repositories once INVENTORY_DEADLINE_MS has passed and adds a warning.
+ * Stops adding repositories once INVENTORY_DEADLINE_MS has passed and adds a warning; each git call gets the time left.
  */
 export function repositoryInventory(cwd, { projects, run, readFile, exists = defaultInventoryDeps.exists, listDirs = defaultInventoryDeps.listDirs, now = Date.now }) {
   const warnings = [];
   if (!cwd) return { repos: [], warnings };
   const start = now();
   const repos = [];
-  for (const path of repoPaths(resolve(cwd), { run, exists, listDirs })) {
-    if (now() - start > INVENTORY_DEADLINE_MS) {
+  for (const path of repoPaths(resolve(cwd), { run, exists, listDirs, timeout: gitTimeout(0) })) {
+    const elapsed = now() - start;
+    if (elapsed > INVENTORY_DEADLINE_MS) {
       warnings.push('repository inventory stopped after 5 s');
       break;
     }
-    const url = git(run, path, 'config', '--get', 'remote.origin.url');
+    const url = git(run, gitTimeout(elapsed), path, 'config', '--get', 'remote.origin.url');
     const origin = url ? stripUserinfo(url) : null;
     const fromConfig = configProject(path, projects);
     if (fromConfig) {
@@ -116,9 +122,12 @@ export function repositoryInventory(cwd, { projects, run, readFile, exists = def
   return { repos, warnings };
 }
 
+/** Text without control characters (U+0000–U+001F, U+007F), so a value cannot start a new prompt line. */
+const oneLine = (text) => text.replace(/[\u0000-\u001f\u007f]/g, '');
+
 export function renderInventory(repos) {
   if (repos.length === 0) return '(no git repositories)';
   return repos
-    .map((r) => `- ${r.path} origin=${r.origin ?? 'none'} project=${r.project_id ?? 'none'}${r.source ? ` (from ${r.source})` : ''}`)
+    .map((r) => `- ${oneLine(r.path)} origin=${r.origin == null ? 'none' : oneLine(r.origin)} project=${r.project_id ?? 'none'}${r.source ? ` (from ${r.source})` : ''}`)
     .join('\n');
 }

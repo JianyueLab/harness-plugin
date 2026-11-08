@@ -21,10 +21,8 @@ describe('hostCommand', () => {
     );
   });
 
-  test('the memory tools include the team project lookups', () => {
-    const allowed = hostCommand('claude-code', { model: null, mcpServer: 'memory' }).args.at(-1).split(',');
-    expect(allowed).toContain('mcp__memory__jyl_project_find');
-    expect(allowed).toContain('mcp__memory__jyl_project_get_context');
+  test('the memory tools are exactly the seven memory and project tools', () => {
+    expect(MEMORY_TOOLS).toEqual(['jyl_project_list', 'jyl_project_find', 'jyl_project_get_context', 'jyl_memory_search', 'jyl_memory_get', 'jyl_memory_add', 'jyl_memory_update']);
   });
 
   test('codex: exec, read-only, built-in tools, apps, plugins and hooks disabled, prompt from stdin; model only when set', () => {
@@ -77,8 +75,6 @@ describe('hostCommand', () => {
     const text = readFileSync(OMP_CONFIG, 'utf8');
     const expected = ['tools:', '  approval:', ...MEMORY_TOOLS.map((t) => `    mcp__memory_${t}: allow`)];
     expect(text.trimEnd().split('\n')).toEqual(expected);
-    expect(text).toContain('mcp__memory_jyl_project_find: allow');
-    expect(text).toContain('mcp__memory_jyl_project_get_context: allow');
   });
 
   test('unknown host is an error', () => {

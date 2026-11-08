@@ -404,7 +404,7 @@ This repo's `.agents/plugins/marketplace.json` takes precedence over `.claude-pl
   - omp: always-ask approval, with only the seven memory tools allowed.
 - Allowed tools: `jyl_project_list`, `jyl_project_find`, `jyl_project_get_context`, `jyl_memory_search`, `jyl_memory_get`, `jyl_memory_add`, `jyl_memory_update`.
 - In omp, `/new`, fork, resume and branch switches also distil the session left behind.
-- The worker lists the git repositories of the session directory: its repository and checked-out submodules, or its direct child repositories. Each has an origin and an optional project id.
+- The worker lists the git repositories of the session directory: its repository and checked-out submodules, or its direct child repositories. Each has an origin and an optional project id. At most 50 repositories are listed, and listing stops after 5 s.
 - Each memory goes to one project, first match wins:
   1. a project the user named in the session;
   2. the repository's project from `projects` in the config, then from `.jyl-memory.json` in the repository root;

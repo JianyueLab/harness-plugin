@@ -1,6 +1,12 @@
 import { describe, expect, test } from 'bun:test';
+import { spawn } from 'node:child_process';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { hook } from '../src/hook.mjs';
-import { sink } from './helpers.js';
+import { cleanup, sink, tempDir } from './helpers.js';
+
+const HOOK = fileURLToPath(new URL('../src/hook.mjs', import.meta.url));
 
 const fakeRepo = {
   run(args) {
@@ -101,4 +107,24 @@ describe('hook', () => {
     expect(spawned).toEqual([]);
     expect(stdout.text()).toBe('');
   });
+
+  test('start with stdin left open exits 0 within 2.5 s and prints the recall', async () => {
+    const home = tempDir('hook-stdin');
+    try {
+      const env = { PATH: process.env.PATH, HOME: home, XDG_CONFIG_HOME: join(home, '.config') };
+      const child = spawn(process.execPath, [HOOK, 'start'], { cwd: home, env, stdio: ['pipe', 'pipe', 'ignore'] });
+      let out = '';
+      child.stdout.setEncoding('utf8').on('data', (chunk) => (out += chunk));
+      const started = Date.now();
+      const code = await new Promise((resolve) => {
+        const timer = setTimeout(() => { child.kill('SIGKILL'); resolve('timeout'); }, 2500);
+        child.on('exit', (c) => { clearTimeout(timer); resolve(c); });
+      });
+      expect(code).toBe(0);
+      expect(Date.now() - started).toBeLessThan(2500);
+      expect(out).toBe(readFileSync(new URL('../prompts/recall.md', import.meta.url), 'utf8').replace('{{REPOSITORIES}}', '(no git repositories)'));
+    } finally {
+      cleanup(home);
+    }
+  }, 5000);
 });

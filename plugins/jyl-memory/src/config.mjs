@@ -23,7 +23,7 @@ export function configPath(env, home) {
 
 function expandHome(path, home) {
   if (path === '~') return home;
-  if (path.startsWith('~/')) return join(home, path.slice(2));
+  if (path.startsWith('~/')) return resolve(home, path.slice(2));
   return resolve(path);
 }
 
@@ -80,7 +80,9 @@ export function loadConfig({ env, home }) {
         if (!value || typeof value !== 'object' || Array.isArray(value)) throw new ConfigError('projects must map directories to project UUIDs');
         for (const [dir, id] of Object.entries(value)) {
           if (dir === '' || typeof id !== 'string' || !UUID.test(id)) throw new ConfigError('projects must map directories to project UUIDs');
-          config.projects[resolve(expandHome(dir, home))] = id;
+          const path = expandHome(dir, home);
+          if (path in config.projects) throw new ConfigError(`projects has two entries for ${path}`);
+          config.projects[path] = id;
         }
         break;
       default:

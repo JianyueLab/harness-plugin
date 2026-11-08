@@ -95,8 +95,8 @@ export async function withLock(dir, fn, { now = Date.now, waitMs = 5000, staleMs
   }
 }
 
-/** Messages not yet uploaded, in session order. Ignores the decision. */
+/** Messages neither uploaded nor refused, in session order. Ignores the decision. */
 export function unsentMessages(session, record) {
-  const sent = new Set(record?.sent_message_ids ?? []);
-  return session.messages.filter((m) => !sent.has(m.id));
+  const done = new Set([...(record?.sent_message_ids ?? []), ...(record?.refused_message_ids ?? [])]);
+  return session.messages.filter((m) => !done.has(m.id));
 }

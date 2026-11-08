@@ -12,6 +12,7 @@ describe('distill', () => {
   let calls;
   let exitCode;
   let stdout;
+  let stderr;
   const deps = () => ({
     env: {},
     home,
@@ -19,7 +20,7 @@ describe('distill', () => {
     promptText: 'Use {{MCP_SERVER}}.',
     runHost: async (cmd, args, input, options) => {
       calls.push({ cmd, args, input, options });
-      return { code: exitCode, stdout };
+      return { code: exitCode, stdout, stderr };
     },
   });
   const statePath = () => join(stateDir({}, home), 'plugin-state.json');
@@ -34,6 +35,7 @@ describe('distill', () => {
     calls = [];
     exitCode = 0;
     stdout = 'Recorded one memory.\n\ndone\n';
+    stderr = '';
   });
   afterEach(() => cleanup(home));
 
@@ -97,6 +99,49 @@ describe('distill', () => {
     expect(existsSync(statePath())).toBe(false);
   });
 
+  test('a failed run logs the last stderr line, scrubbed', async () => {
+    exitCode = 1;
+    stderr = 'Warning: MCP server "x" failed to connect\nWorking...\nError: bad key sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789\n\n';
+    const path = transcript('c-f.jsonl', fourMessageSession('c-f'));
+    expect(await distill({ host: 'claude-code', transcript_path: path, session_id: 'c-f', cwd: '/w' }, deps())).toBe('failed');
+    const log = readFileSync(join(stateDir({}, home), 'plugin.log'), 'utf8');
+    expect(log).toContain('claude-code:c-f failed exit=1: Error: bad key [REDACTED');
+    expect(log).not.toContain('abcdefghijklmnopqrstuvwxyz');
+  });
+
+  test('a timed-out run is logged as such', async () => {
+    exitCode = 124;
+    const path = transcript('c-t.jsonl', fourMessageSession('c-t'));
+    expect(await distill({ host: 'claude-code', transcript_path: path, session_id: 'c-t', cwd: '/w' }, deps())).toBe('failed');
+    expect(readFileSync(join(stateDir({}, home), 'plugin.log'), 'utf8')).toContain('claude-code:c-t failed exit=124: timed out');
+  });
+
+  test('a refused run marks its messages so later runs send only newer ones', async () => {
+    exitCode = 1;
+    stderr = 'Working...\nRefusal (cyber): Cyber safeguards flagged this message.\n';
+    const lines = fourMessageSession('c-r');
+    const path = transcript('c-r.jsonl', lines);
+    expect(await distill({ host: 'claude-code', transcript_path: path, session_id: 'c-r', cwd: '/w' }, deps())).toBe('refused');
+    const record = JSON.parse(readFileSync(statePath(), 'utf8')).sessions['claude-code:c-r'];
+    expect(record.refused_message_ids).toEqual(['u1', 'a3', 'u9', 'u10']);
+    expect(record.sent_message_ids).toEqual([]);
+    expect(readFileSync(join(stateDir({}, home), 'plugin.log'), 'utf8')).toContain('claude-code:c-r refused 4 messages: Refusal (cyber)');
+
+    expect(await distill({ host: 'claude-code', transcript_path: path, session_id: 'c-r', cwd: '/w' }, deps())).toBe('too_short');
+    expect(calls).toHaveLength(1);
+
+    exitCode = 0;
+    stderr = '';
+    const more = ['n1', 'n2', 'n3'].map((uuid) => ({ type: 'user', sessionId: 'c-r', cwd: '/w', uuid, message: { role: 'user', content: `new ${uuid}` } }));
+    writeJsonl(path, [...lines, ...more]);
+    expect(await distill({ host: 'claude-code', transcript_path: path, session_id: 'c-r', cwd: '/w' }, deps())).toBe('distilled');
+    expect(calls[1].input).toContain('new n1');
+    expect(calls[1].input).not.toContain('again');
+    const after = JSON.parse(readFileSync(statePath(), 'utf8')).sessions['claude-code:c-r'];
+    expect(after.sent_message_ids).toEqual(['n1', 'n2', 'n3']);
+    expect(after.refused_message_ids).toEqual(['u1', 'a3', 'u9', 'u10']);
+  });
+
   test('codex runs disable every other MCP server from CODEX_HOME/config.toml; other hosts do not read it', async () => {
     const codexHome = join(home, 'codex-home');
     mkdirSync(codexHome, { recursive: true });
@@ -142,12 +187,14 @@ describe('distill', () => {
     expect(await distill({ host: 'claude-code', transcript_path: path, session_id: 'c-2', cwd: '/w' }, deps())).toBe('distilled');
   });
 
-  test('disabled config, unreadable transcript and non-user Codex threads do nothing', async () => {
+  test('disabled config, missing or unreadable transcript and non-user Codex threads do nothing', async () => {
     mkdirSync(join(home, '.config', 'jyl-memory'), { recursive: true });
     writeFileSync(join(home, '.config', 'jyl-memory', 'plugin.json'), JSON.stringify({ enabled: false }));
     expect(await distill({ host: 'claude-code', transcript_path: '/nope', session_id: 'z', cwd: null }, deps())).toBe('disabled');
     writeFileSync(join(home, '.config', 'jyl-memory', 'plugin.json'), '{}');
-    expect(await distill({ host: 'claude-code', transcript_path: join(home, 'missing.jsonl'), session_id: 'z', cwd: null }, deps())).toBe('unreadable');
+    expect(await distill({ host: 'claude-code', transcript_path: join(home, 'missing.jsonl'), session_id: 'z', cwd: null }, deps())).toBe('no_transcript');
+    expect(readFileSync(join(stateDir({}, home), 'plugin.log'), 'utf8')).toContain('claude-code:z skip no_transcript');
+    expect(await distill({ host: 'claude-code', transcript_path: home, session_id: 'd', cwd: null }, deps())).toBe('unreadable');
     const guardian = transcript('rollout-g.jsonl', codexSession('g', '/w', 'guardian_review'));
     expect(await distill({ host: 'codex', transcript_path: guardian, session_id: 'g', cwd: null }, deps())).toBe('not_user_session');
     expect(calls).toHaveLength(0);
@@ -166,10 +213,10 @@ describe('runHost', () => {
     try {
       const out = join(dir, 'out.txt');
       const script = join(dir, 'fake.sh');
-      writeFileSync(script, `#!/bin/sh\ncat > "${out}"\necho working\necho done\nexit 3\n`, { mode: 0o755 });
-      expect(await runHost(script, [], 'hello', { env: process.env, cwd: dir })).toEqual({ code: 3, stdout: 'working\ndone\n' });
+      writeFileSync(script, `#!/bin/sh\ncat > "${out}"\necho working\necho oops >&2\necho done\nexit 3\n`, { mode: 0o755 });
+      expect(await runHost(script, [], 'hello', { env: process.env, cwd: dir })).toEqual({ code: 3, stdout: 'working\ndone\n', stderr: 'oops\n' });
       expect(readFileSync(out, 'utf8')).toBe('hello');
-      expect(await runHost(join(dir, 'missing'), [], '', { env: process.env, cwd: dir })).toEqual({ code: 127, stdout: '' });
+      expect(await runHost(join(dir, 'missing'), [], '', { env: process.env, cwd: dir })).toEqual({ code: 127, stdout: '', stderr: '' });
     } finally {
       cleanup(dir);
     }

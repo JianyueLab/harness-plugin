@@ -405,6 +405,9 @@ This repo's `.agents/plugins/marketplace.json` takes precedence over `.claude-pl
 - In omp, `/new`, fork, resume and branch switches also distil the session left behind.
 - The host writes only to your personal project. It searches existing memories first and updates them instead of adding duplicates; at most 5 writes per session.
 - Progress is recorded only when the host exits 0 and its last line is `done`.
+- A failed run is retried at the next session end. The log line carries the last line of the host's stderr, with known secret shapes redacted.
+- A refusal (omp prints a stderr line starting with `Refusal`) is not retried: those messages are recorded as refused, and later runs send only newer messages.
+- A session closed before its first message has no transcript; it is logged as `skip no_transcript`.
 - Each distillation costs one host model run.
 
 ### Config

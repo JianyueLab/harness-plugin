@@ -4,7 +4,7 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 import { pathToFileURL } from "node:url";
 
-const scratch = path.resolve(import.meta.dir, "../../.temp/audit-fixes-2026-10-26/GatewayReporter");
+const scratch = path.resolve(import.meta.dir, "../.temp");
 fs.mkdirSync(scratch, { recursive: true });
 const root = fs.mkdtempSync(path.join(scratch, "lock-regression-"));
 afterAll(() => fs.rmSync(root, { recursive: true, force: true }));

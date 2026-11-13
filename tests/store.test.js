@@ -10,24 +10,21 @@ const fresh = (name) => createStore(path.join(root, name));
 
 test("state round-trips and starts empty", () => {
   const store = fresh("state");
-  expect(store.loadState()).toEqual({ version: 2, files: {} });
-  store.saveState({ version: 2, files: { "/a.jsonl": { offset: 42 } } });
-  expect(store.loadState().files["/a.jsonl"].offset).toBe(42);
+  expect(store.loadState()).toEqual({ version: 2 });
+  store.saveState({ version: 2, wakatimeAuthFailures: 3 });
+  expect(store.loadState().wakatimeAuthFailures).toBe(3);
 });
 
-test("migrates a v1 state, carrying its per-file seen keys", () => {
-  const store = fresh("migrate");
+test("existing WakaTime state is retained", () => {
+  const store = fresh("existing");
   fs.mkdirSync(store.dir, { recursive: true });
   fs.writeFileSync(
     path.join(store.dir, "state.json"),
-    JSON.stringify({ version: 1, files: { "/a.jsonl": { offset: 7, seen: ["req_1", "req_2"] } } }),
+    JSON.stringify({ version: 2, files: {}, wakatimeSeen: { "/a.go": 123 }, wakatimeLastSend: { accepted: 1 } }),
   );
 
-  const state = store.loadState();
-
-  expect(state.version).toBe(2);
-  expect(state.files["/a.jsonl"].offset).toBe(7);
-  expect(state.carried).toEqual(["req_1", "req_2"]);
+  expect(store.loadState().wakatimeSeen).toEqual({ "/a.go": 123 });
+  expect(store.loadState().wakatimeLastSend).toEqual({ accepted: 1 });
 });
 
 test("the spool round-trips and clears", () => {
@@ -36,17 +33,6 @@ test("the spool round-trips and clears", () => {
   expect(store.readSpool().map((e) => e.requestId)).toEqual(["a", "b"]);
   store.writeSpool([]);
   expect(store.readSpool()).toEqual([]);
-});
-
-test("the dedup window appends, then compacts once it overshoots", () => {
-  const store = fresh("seen");
-  store.persistSeen(["a", "b"], ["a", "b"]);
-  expect(store.readSeen()).toEqual(["a", "b"]);
-
-  const many = Array.from({ length: 4600 }, (_, i) => `k${i}`);
-  store.persistSeen(many, many.slice(-10));
-  expect(store.readSeen()).toHaveLength(3000);
-  expect(store.readSeen().at(-1)).toBe("k4599");
 });
 
 test("the lock keeps a second run out and is released afterwards", async () => {
@@ -81,6 +67,6 @@ test("a stale lock can be reclaimed, and a replaced lock is never removed by the
 test("two stores in different directories do not share anything", () => {
   const a = fresh("hostA");
   const b = fresh("hostB");
-  a.persistSeen(["only-a"], ["only-a"]);
-  expect(b.readSeen()).toEqual([]);
+  a.writeSpool([{ entity: "/only-a.go" }]);
+  expect(b.readSpool()).toEqual([]);
 });

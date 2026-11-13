@@ -12,7 +12,7 @@
 
 ## Global Constraints
 
-- 插件目录：`plugins/jyl-memory/`。不修改 `jyl-usage` 的任何文件（根目录 `hooks/`、`src/`、`scripts/`、`.claude-plugin/plugin.json`）。
+- Plugin directory: `plugins/jyl-memory/`. Its launcher and state are independent of jyl-wakatime.
 - 零依赖；源码 `.mjs`；测试 `plugins/jyl-memory/test/*.test.js`；`plugins/jyl-memory/package.json` 含 `"type": "module"`。
 - 测试不访问网络，不读取真实主目录，不调用真实的 `claude`、`codex`、`omp`；临时目录在 `plugins/jyl-memory/.temp/`（已被根 `.gitignore` 的 `.temp/` 忽略），测试结束删除。
 - 测试中的密钥样例在运行时拼接，源码中不出现完整的密钥形状字符串。

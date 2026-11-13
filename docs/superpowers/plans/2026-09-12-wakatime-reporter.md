@@ -4,7 +4,7 @@
 
 **Goal:** Turn harness's `RunEnd` hook payload into WakaTime heartbeats, so the hours an agent spends editing files stop being invisible.
 
-**Architecture:** A second, independent tool in this repo, beside `jyl-usage` and sharing only `src/core/store.mjs`. `scripts/wakatime` finds a runtime; `src/wakatime/main.mjs` reads one JSON line from stdin; `heartbeats.mjs` maps it to WakaTime heartbeats and throttles them; `send.mjs` POSTs them 25 at a time to `heartbeats.bulk`; anything undelivered goes back to the spool.
+**Architecture:** An independent tool using `src/core/store.mjs` for state, locking, logs and retry spooling. `scripts/wakatime` finds a runtime; `src/wakatime/main.mjs` reads one JSON line from stdin; `heartbeats.mjs` maps it to WakaTime heartbeats and throttles them; `send.mjs` POSTs them 25 at a time to `heartbeats.bulk`; anything undelivered goes back to the spool.
 
 **Tech Stack:** Plain ESM on node/bun built-ins. No dependencies, no build step. `bun test`.
 
@@ -21,9 +21,8 @@ Every task inherits these.
 - **Zero dependencies, zero build.** Nothing added to `package.json` beyond the existing `private` / `type` / `test`.
 - **Runs under both `bun` and `node`.** No `bun:`-only import outside `try`/`catch`, none at module top level.
 - **Never exit non-zero, never throw out of the hook.** A broken reporter must not turn a harness run red.
-- **This tool sends file paths and project names.** That is its purpose, it is stated in the README above the install instructions, and it is the reason it is not part of `jyl-usage`. It must never send prompts, completions, tool arguments, tool results, or command lines — harness's payload does not contain them (hook spec §5.3), and nothing here may reconstruct them.
+- **This tool sends file paths and project names.** The README states this above the install instructions. It never sends prompts, completions, tool arguments, tool results or command lines; harness's payload does not contain them.
 - **The API key never appears in a URL.** `Authorization: Basic <base64(key)>`, never `?api_key=`.
-- **`jyl-usage` is not touched.** No edits to `src/reporter.mjs`, `src/core/config.mjs`, `src/core/upload.mjs`, `src/core/report.mjs`, `src/hosts/*`, `hooks.json`, `plugin.json`, or `.claude-plugin/`. `src/core/store.mjs` is **read and used, not modified**.
 - **WakaTime limits, copied verbatim from the API docs:** 25 heartbeats per `heartbeats.bulk` request; under 10 requests/second averaged over five minutes; `type` ∈ {`file`, `app`, `url`, `domain`}; `category` includes `ai coding`; `time` is float epoch seconds.
 
 ## File Structure
@@ -921,12 +920,8 @@ Create `src/wakatime/send.mjs`:
 /**
  * POST heartbeats to WakaTime.
  *
- * This is not `src/core/upload.mjs`. That one is written for llm-web's ingest
- * route and bound to it — 500 per batch, the `invalid_source` code, the
- * accepted/duplicates/rejected body. What is copied from it is the part worth
- * keeping: classify every failure by whether *the same bytes* could ever
- * succeed, return `{tally, failed}`, and let the caller own the spool. Writing
- * the spool in here would mean two functions deciding what is still owed.
+ * Classifies failures by whether the same bytes can succeed on retry.
+ * Returns `{tally, failed}`; the caller owns the retry spool.
  */
 
 /** WakaTime's documented cap for the bulk endpoint. */
@@ -1635,13 +1630,10 @@ git commit -m "docs: record what the real WakaTime service actually did"
 
 ## Wrap-up checklist
 
-- [ ] `bun test` fully green, including every pre-existing `jyl-usage` test
+- [ ] `bun test` fully green
 - [ ] `diff` between the two `runend.json` fixtures is empty
 - [ ] `./scripts/wakatime --status` readable, key redacted
 - [ ] Exit code 0 verified for: no runtime, bad stdin, no key, unwritable state dir
-- [ ] `jyl-usage` untouched — `git diff --stat main` shows no change under
-      `src/core/{config,upload,report}.mjs`, `src/hosts/`, `src/reporter.mjs`,
-      `hooks.json`, `plugin.json`, `.claude-plugin/`
 - [ ] README states the privacy posture **above** the install instructions
 - [ ] Editor attribution question answered with real evidence (Task 8 Step 3)
 - [ ] Workspace `.gitmodules` reconciled before any pin is pushed

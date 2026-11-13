@@ -1,385 +1,15 @@
-# jyl-usage & jyl-wakatime
+# JianyueLab harness tools
 
-Two independent tools live in this repository, sharing only the spool / file
-lock / log plumbing in `src/core/store.mjs` — nothing else:
+Two independent, dependency-free tools run on Bun or Node:
 
-- **[`jyl-usage`](#jyl-usage)** reports **token usage** to the JianyueLab LLM
-  portal, for Claude Code and the Antigravity CLI (`agy`).
-- **[`jyl-wakatime`](#jyl-wakatime)** reports **harness's coding activity** —
-  which files an agent run touched, and how many tokens it spent — to
-  WakaTime.
-
-They are separate tools on purpose, not two modes of one tool. `jyl-usage`'s
-promise to the people who install it is that only counts leave the machine;
-WakaTime's required `entity` field *is* a file path. Folding the second into
-the first would mean anyone who already trusted `jyl-usage` starts shipping
-file paths after an update they never read the notes for — that is a
-different consent story, not a config flag on the old one.
-
-## jyl-usage
-
-One reporter, two hosts. jyl-usage reports **token usage** to the JianyueLab
-LLM portal ([`llm-web`](https://github.com/JianyueLab/llm-web)) for both
-Claude Code and the Antigravity CLI (`agy`) — install it into either, or
-both; each host reports its own usage independently, through the same core
-code.
-
-The portal meters everything that goes through its `/v1` proxy. Neither host
-usually does: Claude Code talks to Anthropic directly and bills an Anthropic
-subscription, `agy` talks to Google's own Code Assist protocol and bills a
-Gemini subscription, so from the portal's side that spend is invisible either
-way. jyl-usage closes that gap — after every turn it reads whatever local
-record that host already keeps (Claude Code's session transcript, `agy`'s
-per-conversation SQLite database), extracts the token counts, and POSTs them
-to `/v1/usage/ingest`. The portal stores them beside gateway traffic, tagged
-`source = 'claude-code'` or `source = 'antigravity'`.
-
-**Only counts leave the machine.** Model id, timestamp, request id and token
-totals. Never prompts, completions, file contents, file paths or project names.
-
-**Imported usage never eats your gateway allowance.** Those tokens were billed
-outside the gateway — an Anthropic subscription for Claude Code, a Gemini
-subscription for `agy` — and counting them against the portal's monthly limit
-would charge them twice. They show up in every report and in the leaderboard,
-and the limit stays gateway-only.
-
-### Install (Claude Code)
-
-```sh
-/plugin marketplace add JianyueLab/claude-plugin
-/plugin install jyl-usage@jianyuelab-claude
-```
-
-Requires `bun` or `node` on `PATH` (set `JYL_USAGE_RUNTIME` to an absolute path
-if neither resolves inside Claude Code's environment). There is nothing to
-build: the plugin is the source.
-
-### Install (Antigravity CLI)
-
-Same repository, no separate checkout: the two manifests sit side by side at
-the root (`.claude-plugin/plugin.json` for Claude Code, `plugin.json` for
-`agy`), so installing either host copies the whole thing and the manifests do
-not interfere with each other.
-
-What is actually verified, from a checkout of this repo:
-
-```sh
-$ agy plugin validate .
-  [ok]    .
-          ✔ skills      : 1 processed
-          - agents      : skipped (not found)
-          ✔ commands    : 1 processed (converted to skills)
-          - mcpServers  : skipped (not found)
-          ✔ hooks       : 1 processed
-
-$ agy plugin install "$PWD"
-  [ok]    jyl-usage
-          ✔ skills      : 1 processed
-          - agents      : skipped (not found)
-          ✔ commands    : 1 processed (converted to skills)
-          - mcpServers  : skipped (not found)
-          ✔ hooks       : 1 processed
-```
-
-A bare absolute path is the route that works — `agy plugin --help` lists
-`install <target>`, and no `agy plugin import from claude` and no
-marketplace-file dance was needed.
-
-**The install copies a full local snapshot of the checkout, `.git` included —
-it does not link to it and does not fetch from `origin`.** `agy plugin list`
-shows the installed copy by name; it lands wherever `agy`'s own customization
-root keeps plugins (`~/.gemini/config/plugins/<name>` at the time this was
-verified). Because it is a snapshot, a later local change — including a
-commit — is invisible to `agy` until `agy plugin install "$PWD"` is run again;
-re-running it in place is safe and just refreshes the copy.
-
-Requires `bun` or `node` on `PATH` for the launcher itself (as above), plus —
-specifically for reading `agy`'s conversation databases — one of `bun`'s
-built-in SQLite, Node's `node:sqlite` (22.5+), or the `sqlite3` binary.
-`./scripts/run --host antigravity --status` says which one it found.
-
-### Configure
-
-Two values: the portal **origin** and a portal API key (`jyl-…`, from the
-portal's *API keys* page). Either export them —
-
-```sh
-export JYL_USAGE_BASE_URL="https://llm.jianyuelab.net"
-export JYL_API_KEY="jyl-…"
-```
-
-— or write a config file. One file can serve both hosts:
-
-```json
-{
-  "baseUrl": "https://llm.jianyuelab.net",
-  "apiKey": "jyl-…"
-}
-```
-
-Checked in this order, first match wins: the **environment**, then
-`~/.config/jyl-usage/config.json` (shared — write here once and both hosts
-read it), then the host's own file — `~/.claude/jyl-usage/config.json` for
-Claude Code, `~/.gemini/jyl-usage/config.json` for the Antigravity CLI. The
-environment always wins, so a shell that already exports `JYL_API_KEY` for
-Claude Code's `apiKeyHelper` needs no second copy of the secret on disk; an
-existing `~/.claude/jyl-usage/config.json` keeps working exactly as before —
-the shared file is optional, and only worth adding once you also want the
-Antigravity CLI reporting without a second copy of the key on disk.
-
-> `baseUrl` is the **origin**, not the `…/v1` base every SDK wants — this posts
-> to `<origin>/v1/usage/ingest`. A trailing `/v1` is stripped rather than
-> silently 404ing.
-
-Optional keys in the config file:
-
-| Key | Default | Meaning |
-|---|---|---|
-| `enabled` | `true` | `false` turns the plugin off without uninstalling it (`JYL_USAGE_DISABLED=1` does the same). |
-| `reportGatewayTraffic` | `false` | Claude Code only — include even transcripts observed under a portal-routed hook. Imported rows do not debit gateway allowance. |
-| `excludedTranscripts` | `[]` | Absolute transcript paths to exclude from hook reporting, sweeps and backfills. Explicit exclusion wins. Paths stay local. |
-| `includedTranscripts` | `[]` | Absolute transcript paths to include despite an observed gateway exclusion. Paths stay local. |
-
-**Until it is configured the plugin does nothing at all**, silently. An install
-without a key is inert, not noisy.
-
-### Use
-
-Day to day there is nothing to run on either host — the hooks do the work.
-When you do want to check in:
-
-**Claude Code** — run `/jyl-usage`:
-
-| | |
-|---|---|
-| `/jyl-usage` | Where it reports, whether it is configured, how many events are waiting to retry, recent log lines. |
-| `/jyl-usage flush` | Retry events queued by earlier failed uploads. |
-| `/jyl-usage backfill [days]` | Scan **every** transcript touched in the last N days (default 30) and report anything not sent yet. Safe to repeat. |
-
-Or call the script directly: `"$CLAUDE_PLUGIN_ROOT/scripts/run" --status`.
-
-**Antigravity CLI** — ask the `jyl-usage` skill the same three things, or call
-the script directly with `--host antigravity`, which every invocation needs
-on this host (the reporter defaults to Claude Code):
-
-```sh
-./scripts/run --host antigravity --status
-./scripts/run --host antigravity --flush
-./scripts/run --host antigravity --backfill [days]
-```
-
-**Codex CLI** — `--host codex` reads Codex's rollout files under
-`~/.codex/sessions/` and keeps its state in `~/.codex/jyl-usage/`. Events use
-`source: "codex"`, one of the portal's accepted sources. This repository ships
-no Codex hook manifest, so run it by hand or from your own hook:
-
-```sh
-./scripts/run --host codex --status
-./scripts/run --host codex --flush
-./scripts/run --host codex --backfill [days]
-```
-
-Without `--host` the reporter uses Claude Code. An unknown host name is an
-error: the reporter prints `jyl-usage: unknown host "<name>". Known hosts:
-claude-code, antigravity, codex.` and exits 2 without reading anything.
-
-Two instruction files carry these same three verbs, and that split is
-deliberate, not duplication: `commands/jyl-usage.md` is Claude Code's slash
-command, `skills/jyl-usage/SKILL.md` is `agy`'s skill — each host reads its
-own directory for this. `agy` additionally converts *any* `commands/*.md` it
-finds into a skill of its own (`agy plugin validate .` reports it: "commands
-: 1 processed (converted to skills)"), so `commands/jyl-usage.md` is written
-to stay correct if Antigravity surfaces that converted copy too — it resolves
-the script's path itself when `${CLAUDE_PLUGIN_ROOT}` is unset (which it will
-be there) and says to add `--host antigravity`.
-
-### How it works
-
-```
-Claude Code turn ends
-  └─ Stop hook (async)  →  scripts/run  →  src/reporter.mjs
-        reads $transcript_path from the last recorded byte offset
-        includes $agent_transcript_path for separate subagent files
-        sweeps every other tracked transcript that has grown since
-        keeps assistant entries that carry message.usage
-        POST <portal>/v1/usage/ingest   { source: "claude-code", events: [...] }
-```
-
-Hooks: `SessionStart`, `Stop`, `SubagentStop`, `PreCompact`, `SessionEnd` — all
-declared `async`, so nothing ever waits on an upload. Any of them also drains
-the spool and runs the catch-up sweep, so usage from a session that ended while
-the portal was down — or that ended without a last hook at all — is sent by
-whichever session next fires one.
-
-### How it works (agy)
-
-```
-agy turn ends
-  └─ Stop hook (blocking!) → scripts/run --detach → prints {} and forks
-        reads conversations/<id>.db rows after the recorded idx
-        walks each generation blob for model, request id and counts
-        POST <portal>/v1/usage/ingest  { source: "antigravity", events: [...] }
-```
-
-Only one hook, `Stop` — `agy` has no `PreCompact`/`SessionEnd` equivalent, and
-`PreInvocation` fires before every model call, which would multiply the work
-for nothing. Unlike Claude Code's hooks, `agy`'s are not `async`: a handler
-runs synchronously and blocks the next turn until it returns. `--detach` is
-how `scripts/run` copes — it reads the hook's stdin itself (the forked child
-cannot, since the parent already owns it), forks the real read-and-report
-work into the background with its stdout and stderr redirected away from the
-hook's own, and replies `{}` in milliseconds so the agent loop never waits on
-a slow read, a held lock, or a slow portal. The catch-up sweep covers what a
-missed `Stop` would otherwise strand, same as on Claude Code.
-
-### State
-
-State lives per host — `~/.claude/jyl-usage/` for Claude Code,
-`~/.gemini/jyl-usage/` for the Antigravity CLI — each holding the same five
-files below and tracking only that host's own units (transcripts, or
-conversation databases). Nothing is shared between the two: not the lock, not
-the dedup window, not the spool.
-
-| File | Holds |
-|---|---|
-| `state.json` | Per-unit cursor and observed gateway exclusion. Claude Code/Codex use byte offsets; Antigravity uses generation row indices. |
-| `seen` | The dedup window — the last few thousand request ids sent, newest last. Its own file because `state.json` is touched every turn and this is the part that grows. |
-| `spool.jsonl` | Up to 5,000 retry events. Unread overflow stays behind the source cursor for a later pass. |
-| `log` | What happened, capped at 256 KB. |
-| `lock` | Current process owner. Dead owners older than 60 s may be reclaimed; live paused owners are not stolen. |
-| `lock-turns/` | Unique contender tickets serialize acquisition and stale-lock reclamation. Dead-process tickets are removed. |
-| `pending-units/` | Immutable hook discoveries and observed exclusions, merged by the next lock holder. |
-
-#### Things worth knowing
-
-**The portal accepts four imported sources:** `claude-code`, `grok-build`,
-`antigravity` and `codex`. A server that does not recognize a source returns
-`400 invalid_source`; the reporter queues that response for retry.
-
-**`agy`'s hooks block, so the work is detached.** Unlike Claude Code's hooks,
-`agy` has no `async` flag — a `Stop` handler runs synchronously and holds up
-the next turn until it returns. `scripts/run --detach` forks the actual
-read-and-report work into the background and replies to the hook immediately,
-so a slow read, a held lock, or a slow portal never becomes a pause the user
-feels. See *How it works (agy)* above.
-
-**The field mapping is inferred, not documented, so drift under-reports
-rather than misreports.** `agy` ships no schema for its
-`conversations/<id>.db` protobuf blobs; the token fields were found by
-inspecting real ones. Every row is checked against two invariants before it
-is trusted — the output total must equal thinking-plus-text, and every field
-number present in the counts message must be one this plugin has actually
-seen — and a row that fails either is skipped and logged, never guessed at.
-If a future `agy` renumbers these fields, `--status` and the log show *fewer*
-events reported, not wrong numbers reported as if they were right.
-
-**Hooks retain discoveries even during contention.** Main and separate subagent
-transcripts enter a local immutable inbox before lock acquisition. The next
-lock holder merges that inbox and sweeps tracked transcripts with unread work,
-newest first, capped at 25 additional eligible units per run. Excluded transcripts
-do not consume sweep slots, including after a Retry-After pause.
-
-**Repeated requests are deduplicated at both ends.** Claude Code writes one
-transcript entry per content block, so a single API request that produced text
-*and* a tool call appears twice with the same `requestId`. A line written before
-the response finished carries the output tokens counted so far, so the lines of
-one request are merged into one event holding the largest count of each kind.
-A request is reported once it is settled: a line of it has a `stop_reason`, the
-next request has started, or the transcript has not been written for 30
-minutes. Until then the cursor stays at its first line and the next run reads
-it again whole.
-Resuming a session goes further and copies its whole history into a new
-transcript file. The plugin filters both against one local dedup window — per
-transcript would not have recognised the fork. The portal claims a receipt
-keyed by `(source, user_aid, request_id)` in the same transaction as the usage
-event insert. The same request ID may be imported by different accounts or
-sources; retries within that receipt scope do not create another event.
-
-**Retry delivery also depends on the queue and cursors.** Receipt deduplication
-does not recover an event discarded locally or a transcript never discovered.
-Retained events are retried on subsequent runs. Permanent payload rejections
-are logged and dropped.
-Each pass reads at most the retry queue's free capacity. Source cursors stop
-before unread overflow, including within a single transcript or conversation.
-An HTTP 429 stops the remaining batches in that pass and persists its
-`Retry-After` deadline. Hooks, backfills and flushes retain queued events and
-discoveries without uploading before that time. The delay is bounded from one
-second to one hour; an absent or malformed header defaults to one minute.
-Run another hook, backfill or flush after the deadline to continue.
-
-**A wrong key is retried; a bad payload is not.** `401`/`403`/`429`/`5xx` spool
-for later, because someone will fix the key — an unrecognised `source` (above)
-gets the same treatment. Anything else is logged and dropped, because retrying
-it forever would only grow the spool.
-
-**Observed portal-routed transcripts remain excluded — Claude Code only.**
-A hook whose `ANTHROPIC_BASE_URL` names the configured portal host records an
-exclusion for its main and subagent transcripts. Later direct-context sweeps
-and backfills honor it. `"includedTranscripts"` or `"reportGatewayTraffic": true`
-can explicitly include them; `"excludedTranscripts"` always takes precedence.
-
-Unknown historical transcripts cannot be classified from the current shell's
-environment. Backfill includes them unless explicitly excluded. Choose local
-inclusion/exclusion paths when their provenance is known. An observed routing
-host does not prove which account received a real gateway charge. Duplicate
-aggregate usage is possible only when the same turns were metered for the same
-portal account. Imported usage never consumes gateway allowance.
-
-**Locally fabricated messages are ignored.** Claude Code writes
-`model: "<synthetic>"` entries for API errors and interrupts; no request was
-made, so there is nothing to report.
-
-**Cache tokens are split by TTL**, because the vendor prices them differently
-(5-minute writes at 1.25× input, 1-hour writes at 2×, reads at 0.1×). The portal
-applies those multipliers against the model's input rate; older transcripts that
-carry only a cache-creation total are attributed to the cheaper 5-minute bucket.
-This is Claude-specific pricing; Gemini's implicit caching has no separately
-priced write, so Antigravity events always carry `0` in both write buckets.
-
-### Portal side
-
-`POST /v1/usage/ingest`, authenticated with a portal key as
-`Authorization: Bearer` or `x-api-key`, like every other `/v1` route. Same
-route, same event shape, for both hosts — only `source` and `client` differ:
-
-```jsonc
-{
-  "source": "claude-code",                        // or "antigravity", "codex"
-  "client": "claude-code-usage-reporter/27.1.1",    // or "antigravity-usage-reporter/27.1.1", "codex-usage-reporter/27.1.1"
-  "events": [
-    {
-      "requestId": "req_011Ce…",      // dedup key; falls back to messageId
-      "messageId": "msg_011Ce…",
-      "ts": "2026-08-20T07:07:50.232Z",
-      "model": "claude-opus-5",
-      "inputTokens": 2,               // uncached input
-      "outputTokens": 389,
-      "cacheWrite5mTokens": 0,
-      "cacheWrite1hTokens": 18259,
-      "cacheReadTokens": 22141
-    }
-  ]
-}
-```
-
-Response — per-event, so one malformed entry never blocks its neighbours:
-
-```json
-{ "received": 5, "accepted": 2, "duplicates": 1, "rejected": [{ "index": 3, "reason": "too_old" }] }
-```
-
-Max 500 events per request (a larger batch is rejected, not truncated).
-The portal accepts `claude-code`, `grok-build`, `antigravity` and `codex`.
-An unrecognised source gets `400 invalid_source`, which the plugin queues for
-retry. Deduplication uses receipts scoped to `(source, user_aid, request_id)`.
-The route is
-otherwise deliberately ungated: it spends nothing, so refusing a report
-because the reporter is over its allowance would only throw away the evidence
-that they are.
+- **[`jyl-memory`](#jyl-memory)** recalls and distils session memories through
+  the memory MCP server. Install it through the `jianyuelab-claude` marketplace.
+- **[`jyl-wakatime`](#jyl-wakatime)** sends harness coding activity and token
+  counts to WakaTime. Configure its standalone `scripts/wakatime` launcher.
 
 ## jyl-memory
 
-Recalls JianyueLab memory at session start and distils each session into it when the session ends. Separate from `jyl-usage`: this plugin sends memory content, not counts.
+Recalls JianyueLab memory at session start and distils each session into it when the session ends.
 
 **What leaves the machine:** distilled memories only, written through the `memory` MCP server into your personal project or a team project matched to the repository. Repository origin URLs, without credentials, go to the `memory` server for project lookup. Session text goes only to the model of the host you are already using (`claude -p`, `codex exec`, `omp -p`), with tool output dropped and known secret shapes redacted.
 
@@ -539,11 +169,9 @@ that did not end `"ok"`.
 
 ### Install: wire it into harness
 
-**Step 0, before the hook config: get a checkout and a key.** Unlike
-`jyl-usage`'s Claude Code route above, there is no marketplace install here —
-harness's `command` needs a real absolute path, so clone or copy this repo
-somewhere that will not move (`git submodule update` detaching HEAD, or the
-directory getting renamed, both break the path silently). The launcher also
+Clone or copy this repository somewhere that will not move. There is no
+marketplace install for jyl-wakatime: harness's `command` needs a real
+absolute path. The directory must stay at that path. The launcher also
 needs `bun` or `node` on `PATH` at the moment harness execs it — set
 `JYL_WAKATIME_RUNTIME` to an absolute interpreter path if neither resolves in
 harness's environment (harness inherits its own full environment into the
@@ -596,11 +224,8 @@ api url:  WAKATIME_API_URL
 ```
 
 **`~/.config/jyl-wakatime` always means `$HOME/.config/jyl-wakatime`, literally.**
-This tool does not honour `$XDG_CONFIG_HOME` — that is the existing
-convention in this repo (`jyl-usage`'s own state directories are the same
-kind of hardcoded path), not something decided fresh here. If that ever
-changes, it has to change in exactly one place
-(`STATE_DIR`/`JSON_CONFIG_FILE` in `src/wakatime/cfg.mjs`) and the
+This tool does not honour `$XDG_CONFIG_HOME`. Its state path is defined by
+`STATE_DIR`/`JSON_CONFIG_FILE` in `src/wakatime/cfg.mjs`; the
 `scripts/wakatime` fallback that mirrors it for when no runtime is on `PATH`
 (see "Is it working?" below) has to move with it — the two are not allowed
 to drift, since nothing else would notice if they did.
@@ -687,8 +312,7 @@ error. They never silently disable privacy.
 not a log line on every single run — one line logged the first time, then
 silence until the config is fixed. (`JYL_WAKATIME_DISABLED=1`, or
 `"enabled": false` in the JSON config, turns it off the same way, on
-purpose.) An install with no key configured is inert, exactly like
-`jyl-usage`.
+purpose.) An install with no key configured is inert.
 
 ### Is it working? (`--status`)
 
@@ -733,8 +357,7 @@ reports what the most recent attempt actually did — for example:
 | `accepted 0` with an **empty spool and no `PROBLEM` line** | the dangerous healthy-looking reading. Two ways to get here, both meaning "everything went in the bin". **The whole request was refused** with a non-retryable 4xx (anything but 401/403/429) — `send.mjs` drops that batch for good, so it never reaches the spool. Not hypothetical: a mistyped path on a self-hosted wakapi/hakatime `api_url` produces exactly this. Or **the request was accepted and each heartbeat inside it was refused** — WakaTime answers `202` with a status per heartbeat, and a heartbeat rejected on content is dropped for the same reason. Either way `rejected N` now appears on the `last send` line — that is the tell, and it is the reason to read the log next: `wakatime rejected 3 heartbeat(s), dropping: 400 bad request` for the whole-request case, `wakatime rejected 3 of 3 heartbeat(s) individually, dropping: 400 x3` for the per-item one. What `accepted` counts is heartbeats WakaTime said it **kept** — never heartbeats merely handed over — which is what makes this reading a signal at all |
 
 The full log behind that summary is `~/.config/jyl-wakatime/log`, capped at
-256 KB — the same rotation `jyl-usage` uses, from the `src/core/store.mjs`
-the two tools share. `./scripts/wakatime --flush` retries whatever is
+256 KB by `src/core/store.mjs`. `./scripts/wakatime --flush` retries whatever is
 currently spooled right away, reading no stdin — worth running immediately
 after fixing a bad key or a wakapi outage rather than waiting for harness's
 next run to pick the spool back up (which happens automatically too, on
@@ -742,9 +365,8 @@ every hook invocation).
 
 ### There is no `--backfill`
 
-`jyl-usage` can rescan transcripts because a transcript is a file that keeps
-existing after the fact. jyl-wakatime has nothing like it: its only input is
-one JSON line on stdin, read once, by a process that then exits. A heartbeat
+jyl-wakatime's only input is one JSON line on stdin, read once, by a process
+that then exits. A heartbeat
 that failed to send is retried from the spool; a heartbeat that was never
 produced at all — because the hook never fired, or the process reading stdin
 was killed first — is simply gone. There is no flag for this because there
@@ -764,3 +386,18 @@ diff tests/fixtures/runend.json ../harness/hook/testdata/runend.json
 No output means the two still agree. Changing the payload — a renamed field,
 a new property on a tool call — means changing both repositories in the same
 change; neither side's test suite will notice that the other one drifted.
+
+## Local checks
+
+From the repository root:
+
+```sh
+bun test
+node --test tests/review-blockers.test.mjs
+./scripts/wakatime --status
+printf '%s\n' '{"cwd":"/nonexistent/jyl-memory-smoke"}' | ./plugins/jyl-memory/scripts/run start
+printf '%s\n' '{}' | ./plugins/jyl-memory/scripts/run end
+```
+
+The memory start command prints the recall prompt. The empty end payload
+does not start a distillation. WakaTime status does not send heartbeats.

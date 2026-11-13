@@ -1,12 +1,8 @@
 /**
  * POST heartbeats to WakaTime.
  *
- * This is not `src/core/upload.mjs`. That one is written for llm-web's ingest
- * route and bound to it — 500 per batch, the `invalid_source` code, the
- * accepted/duplicates/rejected body. What is copied from it is the part worth
- * keeping: classify every failure by whether *the same bytes* could ever
- * succeed, return `{tally, failed}`, and let the caller own the spool. Writing
- * the spool in here would mean two functions deciding what is still owed.
+ * Classifies failures by whether the same bytes can succeed on retry.
+ * Returns `{tally, failed}`; the caller owns the retry spool.
  */
 
 /** WakaTime's documented cap for the bulk endpoint. */

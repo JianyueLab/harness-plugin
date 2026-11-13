@@ -1,11 +1,6 @@
 #!/usr/bin/env sh
 # Launcher for the WakaTime reporter.
 #
-# Deliberately a second launcher rather than a flag on scripts/run: jyl-usage
-# sends counts only, this one sends file paths. Two privacy postures sharing
-# one entry point is how a shared config path and an accidental cross-import
-# get introduced later.
-#
 # Never exits non-zero once it is running. This is bookkeeping; a harness run
 # must not go red because a reporter could not find a runtime, could not find
 # its own entry point, or was pointed at a JYL_WAKATIME_RUNTIME that is not a

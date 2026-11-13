@@ -14,13 +14,13 @@
 
 ## 2. 已作决定
 
-- 新插件 `jyl-memory`，放在 `harness-plugin/plugins/jyl-memory/`。与 `jyl-usage` 分开：`jyl-usage` 只上报计数，本插件发送记忆内容。
+- `jyl-memory` lives in `harness-plugin/plugins/jyl-memory/` and sends distilled memories.
 - 支持 Claude Code、Codex、omp。
 - 提炼由宿主自己的 CLI 无界面运行：`claude -p`、`codex exec`、`omp -p`。不另配模型 key。
 - 写入只用 memory MCP：`jyl_memory_search`、`jyl_memory_get`、`jyl_memory_add`、`jyl_memory_update`。记忆写入个人项目 My memory，`visibility` 为 `private`，`state` 为 `active`。
 - 原文不离开本机。发送给模型的只有过滤、脱敏后的正文，模型提供商与会话本身相同。
 - 记忆没有原文出处（`sources` 为空）。
-- 零依赖 ESM，由 `bun` 或 `node` 运行，与 `jyl-usage` 相同。
+- Zero-dependency ESM runs on Bun or Node.
 - `memory-capture` 仓库与 `jyl-memory` CLI 在本插件上线后停用。
 
 ## 3. 组成

@@ -43,38 +43,13 @@ harness's `RunEnd` payload from stdin and turns it into WakaTime heartbeats.
   and this tool does not post to the portal at all.
 - `wakatime-cli`. See "Why not the CLI" below.
 
-## This is a separate tool, not a second sink in `jyl-usage`
+## Standalone WakaTime integration
 
-`jyl-usage`'s headline promise, three paragraphs into the README, is:
-
-> **Only counts leave the machine.** Model id, timestamp, request id and token
-> totals. Never prompts, completions, file contents, file paths or project names.
-
-**WakaTime's required `entity` field is a file path, and `project` is a project
-name.** Bolting a WakaTime sink onto `jyl-usage` would mean anyone who already
-installed it starts shipping paths after an upgrade they did not read the notes
-for. That is not a promise to soften with a config flag; it is a different
-product with a different consent story.
-
-So: same repo, two tools, side by side.
-
-| | `jyl-usage` | `jyl-wakatime` |
-|---|---|---|
-| Reports | token counts | file activity + AI token counts |
-| To | `llm-web` `/v1/usage/ingest` | WakaTime (or a self-hosted wakapi) |
-| Hosts | Claude Code, `agy` | harness |
-| Installed as | plugin manifests (`.claude-plugin/plugin.json`, `plugin.json`) | a path in harness's `config.toml` |
-| Leaves the machine | counts only | **paths and project names** |
-| Entry point | `scripts/run` | `scripts/wakatime` |
-| Version | 0.3.0 | 0.1.0 |
-
-**A separate launcher, not `scripts/run --host harness`.** An earlier draft
-routed it through the existing entry point. Two tools with two different
-privacy postures sharing one launcher is exactly the kind of thing that later
-grows a shared config path and an accidental cross-import; a second twelve-line
-`sh` script costs nothing and keeps the boundary where the README says it is.
-
-`src/core/` is still shared — see Architecture.
+`jyl-wakatime` sends file activity and token counts from harness to WakaTime
+or a self-hosted wakapi. File paths and project names leave the machine.
+The standalone `scripts/wakatime` launcher is configured as an absolute path
+in harness's `config.toml`. State, retry spooling, locking and logging use
+`src/core/store.mjs`.
 
 ## Why not `wakatime-cli`
 
@@ -425,9 +400,7 @@ which sniffs content; it is the accepted cost of not shipping the binary.
 ## Privacy
 
 **This tool sends file paths and project names off the machine. That is what it
-is for.** It has to be stated plainly, in the README, above the install
-instructions — not softened, and not in a footnote under `jyl-usage`'s
-"counts only" promise.
+is for.** The README states this above the install instructions.
 
 What it sends: absolute file paths, project name, git branch, language, token
 counts (fresh and cached separately), prompt length in characters, **the model
@@ -685,9 +658,8 @@ the second is only half settled, because no browser was reachable.**
 2. **The 120-second throttle is WakaTime's number for humans typing.** An agent
    editing the same file eight times in ninety seconds is a different pattern.
    Ship WakaTime's rule; revisit once there is a week of real data.
-3. **`--backfill` has no meaning here** and is not implemented: unlike
-   `jyl-usage`, there is no local record to rescan — if a turn's payload was
-   lost, it is gone. Worth stating in the README so nobody looks for the flag.
+3. **`--backfill` has no meaning here** and is not implemented. There is no
+   local record to rescan: if a turn's payload was lost, it is gone.
 4. **The `.gitmodules` mismatch.** The workspace root records `path =
    claude-plugin` while the working copy sits at `harness-plugin/`. That has to
    be reconciled before any pin can be committed; it is not this design's

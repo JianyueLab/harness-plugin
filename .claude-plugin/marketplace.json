@@ -8,17 +8,6 @@
   },
   "plugins": [
     {
-      "name": "jyl-usage",
-      "source": "./",
-      "description": "Reports Claude Code token usage to the JianyueLab LLM portal (llm-web).",
-      "version": "27.1.1",
-      "category": "productivity",
-      "tags": [
-        "usage",
-        "metrics"
-      ]
-    },
-    {
       "name": "jyl-memory",
       "source": "./plugins/jyl-memory",
       "description": "Recalls JianyueLab memory at session start and distils each session into it when the session ends.",

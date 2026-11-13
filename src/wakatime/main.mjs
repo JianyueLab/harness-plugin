@@ -1,10 +1,8 @@
 /**
  * jyl-wakatime — harness's RunEnd hook -> WakaTime heartbeats.
  *
- * **This tool sends file paths and project names off the machine.** That is
- * what it is for, and it is why it is a separate tool from jyl-usage rather
- * than a second sink inside it. It never sends prompts, completions, tool
- * arguments or tool results: harness's payload does not contain them.
+ * Sends file paths and project names to WakaTime. Never sends prompts,
+ * completions, tool arguments or tool results: harness's payload omits them.
  */
 import os from "node:os";
 import { createStore } from "../core/store.mjs";
@@ -89,13 +87,7 @@ export async function runHook({ store, stdinText, cfg, now, send = sendAll, harn
     }
 
     const ran = await store.withLock(async () => {
-      // The throttle table (`wakatimeSeen`) and the project/branch cache
-      // (`wakatimeProjects`) both live inside jyl-usage's own state object.
-      // `store.loadState()` returns extra keys untouched as long as its own
-      // `version` still matches STATE_VERSION -- a deliberate dependency on
-      // that behaviour, not an oversight. If jyl-usage ever bumps
-      // STATE_VERSION, this throttle table resets silently; the cost is one
-      // extra batch of heartbeats, which is acceptable.
+      // The throttle table and project/branch cache share the run state.
       const state = store.loadState();
       // Reaching this line means configProblem(cfg) was falsy above: the
       // config is valid on this run, so reset the once-only log flag for the
@@ -174,8 +166,8 @@ export async function runHook({ store, stdinText, cfg, now, send = sendAll, harn
     });
 
     if (!ran) {
-      // Another run holds the lock. Unlike jyl-usage, there is nothing to
-      // re-read afterwards -- this payload existed only on stdin -- so
+      // Another run holds the lock. There is nothing to re-read afterwards:
+      // this payload existed only on stdin, so
       // whatever heartbeats it would have produced are gone, not merely
       // delayed. Spooling them here is not safe (writeSpool is a whole-file
       // rewrite, unsafe without the lock), so logging an honest count is the
@@ -255,8 +247,7 @@ export async function main(argv, stdinText, overrides = {}) {
     // of its own -- `store.readSpool()` on an unwritable state dir throws
     // straight through it -- and `--status` is the one surface whose entire
     // job is making this tool's silence visible. It must not turn a bad state
-    // dir into an uncaught rejection there. Mirrors `reporter.mjs`'s identical
-    // `main().catch(...)` net for the sibling tool's version of this rule.
+    // dir into an uncaught rejection there.
     try {
       store.log(`unexpected failure in main: ${err?.stack ?? err}`);
     } catch {
